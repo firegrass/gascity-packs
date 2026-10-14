@@ -494,6 +494,10 @@ def admission_retryable(packet):
 
 _BEADS = {}
 
+# Where Markdown work records live. Under the Beads authority nothing in the
+# factory writes one; `_land_backlog_change` refuses a landing that stages one.
+WORK_RECORD_ROOTS = ("docs/backlog/items/", "docs/backlog/epics/", "docs/backlog/milestones/", "docs/questions/")
+
 # The lines a claim, a release or a completion rewrite. They change the FILE
 # without changing the WORK: an item is "re-shaped" only when something else did.
 _VOLATILE = re.compile(r"(?m)^(status|claimed_by|claimed_at|claim_expires|last_reviewed):.*\n")
@@ -552,6 +556,23 @@ def triaged(given, today, reason=""):
 def flag(value):
     """bd stores `--set-metadata k=true` as a JSON boolean, not the string."""
     return str(value).strip().lower() == "true"
+
+
+def triaged_row(packet_md, row, reason=""):
+    """`triaged()` for a packet whose item lives in the work ledger (ADR-0236).
+
+    Git compares the item's text at the claim commit with its text on main.
+    The ledger keeps no file: the bead's `proof.packet_digest` is the row's
+    semantic digest at admission, and a re-shape is a different digest now.
+    The stop-code rule is the same, read off the row's body and fields."""
+    given, today = packet_md.get("proof.packet_digest") or "", (row or {}).get("semantic_digest") or ""
+    if not row or not given or given == today:
+        return "the item has not changed since it was declined"
+    code = stop_code(reason)
+    text = (row.get("body") or "") + "\n" + json.dumps(row.get("fields") or {}, sort_keys=True)
+    if code and code not in text:
+        return "the item was re-shaped but does not name the stop code %s; a triage quotes every stop code it answers" % code
+    return ""
 
 
 def rig_beads(city, rig, fresh=False):
@@ -772,6 +793,16 @@ def _land_backlog_change(clone, message, add=()):
         if staged.returncode != 0:
             undo("staging %s failed: %s" % (", ".join(add), (staged.stdout + staged.stderr).strip()[-300:]))
     sh(["git", "-C", clone, "add", "-u", "docs"])
+    # Under the Beads authority a landing may carry docs — raw evidence, a
+    # work note, an ADR's delivery state — but never a work record: those live
+    # in the ledger, and a Markdown copy of one would be a second writer.
+    import work_authority as wa
+    if wa.beads(clone):
+        staged = sh(["git", "-C", clone, "diff", "--cached", "--name-only"]).stdout.split()
+        records = [p for p in staged if p.startswith(WORK_RECORD_ROOTS)]
+        if records:
+            undo("refusing to land Markdown work records under the beads work authority (ADR-0236): %s"
+                 % ", ".join(records[:6]))
     fresh = sh([sys.executable, "scripts/validate_docs.py", "--refresh-epic-views"], cwd=clone)
     if fresh.returncode != 0:
         undo("view refresh failed: %s" % (fresh.stdout + fresh.stderr).strip()[-600:])

@@ -85,6 +85,39 @@ the script header. The operator's city.toml change, including the compactor
 allowlist that keeps `gc dolt compact` off the ledger, is
 `docs/work-retention-install.md`.
 
+## Factory clients and the work authority
+
+The factory clients (`dispatcher.py`, `admit.py`, `completer.py`, `keeper.py`,
+`status.py`, `pr_recovery.py`, `livetest_evidence.py`, `execution_contract.py`)
+read the orchestrator's committed marker `gascity/work-authority.json` through
+`assets/scripts/work_authority.py` (ADR-0236). Absent or `authority: git`, every
+client keeps its Markdown-on-main path byte for byte. Under `authority: beads`:
+
+- records come from `python3 scripts/work_client.py snapshot --json` in the
+  owned orchestrator clone, never from a Markdown file; mutations (`claim`
+  through `next_work.py`, `renew`, `release`, `evidence`, `complete`) go through
+  that client with the seat's lease, and no client writes a Markdown work record
+  (`factory_lib.land_backlog_change` refuses a staged one);
+- admission emits `proof.contract.v2` (`schemas/proof.contract.v2.json`): v1 plus
+  a `work` binding of ledger identity, revisions and lease; the verifier accepts
+  v1 for historical runs; the lease is stored on the execution bead as
+  `proof.lease_id`; `--landing main` is refused, because that packet completes
+  its item in Markdown;
+- the dispatcher admits nothing unless `<city>/proof/work-retention.json` is
+  younger than ten minutes, `ok` and replicated within five minutes, and logs
+  one standing reason otherwise;
+- the completer completes through the checked completion command with the
+  merged pull request, merge and green main commits, the approved tree and the
+  attempt, catches the helper's last-active-child refusal and holds that item
+  for a person as before, and lands ADR delivery bookkeeping as a docs change;
+- the keeper renews an expiring lease itself; the live-result publisher lands
+  its two documents, records the raw record through `evidence` and completes a
+  pass with the landing commit as its merge and main identity.
+
+A marker carrying `freeze: true` (either authority) is a write freeze: the
+dispatcher admits and claims nothing, the completer completes and renews
+nothing, keeper renewals skip; reads stay available.
+
 ## Tests
 
 ```sh

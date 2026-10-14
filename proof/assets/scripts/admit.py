@@ -74,6 +74,7 @@ import shaping_evidence  # noqa: E402
 
 BACKLOG_REPO = "liskov-agent-orchestrator"  # the repository that holds docs/backlog
 SEAT_PREFIX = "gascity/"              # claims must be held by gascity/<rig>
+LEASE_KEY = "proof.lease_id"          # the seat's ledger lease, on the execution bead (ADR-0236)
 WORKER = "proof.worker"
 FORMULA = "mol-proof-packet"
 LIVE_FORMULA = "mol-proof-livetest"
@@ -255,6 +256,26 @@ def refresh_backlog_clone(clone):
 
 
 def load_item(clone, item_id):
+    """(path, frontmatter, body, docs_model) for one backlog item.
+
+    Under the Git authority the item is its Markdown file on origin/main in the
+    owned clone. Under the Beads authority (ADR-0236) it is the client
+    snapshot's row — no Markdown file is read — and the path is the row's
+    legacy path under the clone, virtual after cutover. `docs_model` is the
+    workspace's own parser and scope model either way."""
+    import work_authority as wa
+    if wa.beads(clone):
+        row = wa.row(clone, item_id)
+        if row is None:
+            raise Refused("the work ledger has no record for %s" % item_id)
+        fm, body = row.get("fields"), row.get("body")
+        if not isinstance(fm, dict) or not isinstance(body, str) or not isinstance(row.get("path"), str):
+            raise Refused("the work ledger record for %s is malformed" % item_id)
+        if fm.get("doc_type") != "backlog":
+            raise Refused("%s is not a backlog item" % item_id)
+        sys.path.insert(0, os.path.join(clone, "scripts"))
+        import docs_model as dm  # the workspace's own parser and scope model
+        return os.path.join(clone, row["path"]), dict(fm), body, dm
     matches = glob.glob(os.path.join(clone, "docs/backlog/items", item_id + "-*.md"))
     if len(matches) != 1:
         raise Refused("expected exactly one backlog item file for %s on origin/main, found %d"
@@ -269,13 +290,30 @@ def load_item(clone, item_id):
     return matches[0], fm, body, dm
 
 
+def item_identity(clone, rel_item, item_id):
+    """(packet digest, claim commit) recorded on a work bead.
+
+    Git: the item's blob at HEAD and the last commit that touched it. Beads:
+    the ledger row's semantic digest and the ledger revision as
+    `ledger:<revision>` — git may no longer hold the file at all."""
+    import work_authority as wa
+    if wa.beads(clone):
+        row = wa.row(clone, item_id)
+        if row is None:
+            raise Refused("the work ledger has no record for %s" % item_id)
+        return str(row.get("semantic_digest") or ""), "ledger:%s" % wa.ledger_revision(clone)
+    digest = run(["git", "-C", clone, "rev-parse", "HEAD:" + rel_item]).stdout.strip()
+    claim_commit = run(["git", "-C", clone, "log", "-1", "--format=%H", "--", rel_item]).stdout.strip()
+    return digest, claim_commit
+
+
 def parse_ts(value):
     text = str(value).strip().replace("Z", "+00:00")
     stamp = datetime.fromisoformat(text)
     return stamp if stamp.tzinfo else stamp.replace(tzinfo=timezone.utc)
 
 
-def check_eligible(item_id, fm, dm, rig, want, allowlist_path):
+def check_eligible(item_id, fm, dm, rig, want, allowlist_path, clone=None):
     allowed = set()
     if os.path.isfile(allowlist_path):
         for line in open(allowlist_path, encoding="utf-8"):
@@ -301,7 +339,23 @@ def check_eligible(item_id, fm, dm, rig, want, allowlist_path):
     if left < MIN_CLAIM_LEFT:
         raise Refused("the claim on %s expires in %s; renew it before admitting "
                       "(next_work.py --renew %s --by %s)" % (item_id, left, item_id, seat))
+    if clone is not None:
+        check_lease(clone, item_id, seat)
     return check_scopes(item_id, fm, dm, want)
+
+
+def check_lease(clone, item_id, seat):
+    """Under the Beads authority a claim is a lease: the snapshot row must carry
+    one for the seat, or admission has nothing to bind the run to. Returns the
+    lease id, or '' under Git."""
+    import work_authority as wa
+    if not wa.beads(clone):
+        return ""
+    lease = wa.lease_of(clone, item_id, seat)
+    if not lease:
+        raise Refused("%s carries no live lease for %s in the work ledger; claim it on the existing path "
+                      "(next_work.py --claim) and admit again" % (item_id, seat))
+    return lease
 
 
 def check_kind(item_id, fm):
@@ -485,12 +539,17 @@ def check_shaping_evidence(item_id, fm, body, dm, backlog_clone, *, rigs=None,
     refuse(shaping_evidence.check_evidence(body, repo_roots=roots, **options))
 
 
-def check_landing(landing, rig, rig_repo, rel_item):
+def check_landing(landing, rig, rig_repo, rel_item, clone=None):
     """`main` lands and completes in one commit, so the item must live in the
     repository the packet works in — and that repository's own rules must land
-    on main directly. Both are true of exactly one repository."""
+    on main directly. Both are true of exactly one repository — and of one
+    authority: that completing commit is a Markdown work-record write, which
+    the Beads authority refuses (ADR-0236), so `main` is refused under it."""
     if landing != "main":
         return
+    if clone is not None:
+        import work_authority as wa
+        wa.refuse_markdown_write(clone, "--landing main (the packet completes its item on the branch)")
     if rig_repo != BACKLOG_REPO:
         raise Refused("--landing main is only for the %s repository, which lands on main "
                       "directly and holds the backlog item the landing completes. Rig %r is %s: "
@@ -1080,12 +1139,11 @@ def admit_live(args, city, rig_clone, backlog_clone, main_sha, item_path, rel_it
     import livetest_state as ls
     level = args.exercise or DEFAULT_EXERCISE
     scopes = check_eligible(args.item, fm, dm, args.rig, repo_name(rig_clone),
-                            os.path.join(city, "proof", "pilot-allowlist.txt"))
+                            os.path.join(city, "proof", "pilot-allowlist.txt"), backlog_clone)
     recipe = check_live(args.item, fm, scopes, rig_livetest(city, args.rig), level, args.landing, args.rig)
     if args.review:
         raise Refused("--review is for an implementation packet; a live test has no diff to review")
-    digest = run(["git", "-C", backlog_clone, "rev-parse", "HEAD:" + rel_item]).stdout.strip()
-    claim_commit = run(["git", "-C", backlog_clone, "log", "-1", "--format=%H", "--", rel_item]).stdout.strip()
+    digest, claim_commit = item_identity(backlog_clone, rel_item, args.item)
     prior = existing_beads(city, args.rig, args.item)
     if prior:
         raise Refused("%s was already admitted as %s. A live test is never re-admitted onto an earlier run: a "
@@ -1141,6 +1199,9 @@ def admit_live(args, city, rig_clone, backlog_clone, main_sha, item_path, rel_it
     meta = {"proof.packet_id": args.item, "proof.packet_digest": digest, "proof.claim_commit": claim_commit,
             "proof.branch": branch, "proof.exercise": level, "proof.live_target": manifest["target"],
             "proof.live_run_id": run_id, "proof.live_manifest_digest": manifest["digest"], "work_dir": work_dir}
+    lease = check_lease(backlog_clone, args.item, SEAT_PREFIX + args.rig)
+    if lease:
+        meta[LEASE_KEY] = lease
     with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False, encoding="utf-8") as fh:
         fh.write(body)
     try:
@@ -1247,11 +1308,10 @@ def main(argv):
     if args.landing is None:
         raise Refused("--landing is required for an implementation packet; there is no default")
     scopes = check_eligible(args.item, fm, dm, args.rig, repo_name(rig_clone),
-                            os.path.join(city, "proof", "pilot-allowlist.txt"))
-    check_landing(args.landing, args.rig, repo_name(rig_clone), rel_item)
+                            os.path.join(city, "proof", "pilot-allowlist.txt"), backlog_clone)
+    check_landing(args.landing, args.rig, repo_name(rig_clone), rel_item, backlog_clone)
     design = check_design(args.item, fm, scopes, backlog_clone)
-    digest = run(["git", "-C", backlog_clone, "rev-parse", "HEAD:" + rel_item]).stdout.strip()
-    claim_commit = run(["git", "-C", backlog_clone, "log", "-1", "--format=%H", "--", rel_item]).stdout.strip()
+    digest, claim_commit = item_identity(backlog_clone, rel_item, args.item)
 
     name = "%s-%s" % (args.item.lower(), slugify(fm.get("title", "")))
     branch = "agent/BKLG-" + name.removeprefix("bklg-")
@@ -1279,7 +1339,7 @@ def main(argv):
             rel_item, fm, item_body = ec.record(backlog_clone, revision, args.item)
             item_path = os.path.join(backlog_clone, rel_item)
             scopes = check_eligible(args.item, fm, dm, args.rig, repo_name(rig_clone),
-                                    os.path.join(city, "proof", "pilot-allowlist.txt"))
+                                    os.path.join(city, "proof", "pilot-allowlist.txt"), backlog_clone)
             design = check_design(args.item, fm, scopes, backlog_clone)
             recipe_digest = ec.recipe_for(city, rigs, args.rig)
             base = ec.snapshot(rig_clone)
@@ -1313,8 +1373,11 @@ def main(argv):
                 if not args.dry_run:
                     attempt = ec.prepare(city, contract)
             main_sha = revision
-            digest = ec.git(backlog_clone, "rev-parse", revision + ":" + rel_item)
-            claim_commit = ec.git(backlog_clone, "log", "-1", "--format=%H", revision, "--", rel_item)
+            if contract and contract.get("work"):
+                digest, claim_commit = contract["work"]["semantic_digest"], "ledger:%s" % contract["work"]["ledger_revision"]
+            else:
+                digest = ec.git(backlog_clone, "rev-parse", revision + ":" + rel_item)
+                claim_commit = ec.git(backlog_clone, "log", "-1", "--format=%H", revision, "--", rel_item)
         elif any((b.get("metadata") or {}).get("proof.contract_id") for b in history):
             raise Refused("contract: missing admission journal; cannot downgrade to legacy")
         prior = [b for b in history if str((b.get("metadata") or {}).get("proof.superseded")).lower() != "true"]
@@ -1422,6 +1485,13 @@ def main(argv):
                     "proof.landing": args.landing, "work_dir": work_dir}
             if contract:
                 meta.update({"proof.contract_id": contract["id"], "proof.contract_attempt": attempt["attempt"]})
+            # The lease the seat holds in the ledger travels on the execution
+            # bead, so the completer, the keeper and a release can renew or
+            # settle it without re-reading the snapshot for the holder.
+            lease = (contract.get("work") or {}).get("lease_id") if contract else ""
+            lease = lease or check_lease(backlog_clone, args.item, SEAT_PREFIX + args.rig)
+            if lease:
+                meta[LEASE_KEY] = lease
             meta.update(recovery_review.provenance(city))
             if recovery_trial:
                 meta["proof.recovery_trial"] = recovery_trial

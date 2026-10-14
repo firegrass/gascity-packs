@@ -159,7 +159,9 @@ MANIFEST_KEYS = ("kind", "run_id", "item_id", "item_blob_sha", "exercise", "reci
 
 RUN_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 ITEM_ID_RE = re.compile(r"^BKLG-\d{8}-[a-z0-9]{4}$")
-BLOB_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+# The item's identity at admission: its git blob (forty hex) under the Git work
+# authority, its ledger semantic digest (sixty-four hex) under Beads (ADR-0236).
+BLOB_SHA_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 PROFILE_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 RECIPE_VERSION_RE = re.compile(r"-v(\d+)$")
 INSTANT_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
@@ -297,7 +299,8 @@ def manifest_errors(manifest):
     if not isinstance(body["item_id"], str) or not ITEM_ID_RE.match(body["item_id"]):
         errors.append("item_id must be a backlog id, got %r" % (body["item_id"],))
     if not isinstance(body["item_blob_sha"], str) or not BLOB_SHA_RE.match(body["item_blob_sha"]):
-        errors.append("item_blob_sha must be a forty-hex-digit blob, got %r" % (body["item_blob_sha"],))
+        errors.append("item_blob_sha must be a forty-hex git blob or a sixty-four-hex ledger digest, got %r"
+                      % (body["item_blob_sha"],))
 
     level = body["exercise"]
     if level not in lt.EXERCISE_LEVELS:
