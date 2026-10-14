@@ -12,7 +12,8 @@ permissions:
 jobs:
   check:
     name: Check
-    runs-on: blacksmith-32vcpu-ubuntu-2404
+    # Forks do not inherit the upstream Blacksmith runner installation.
+    runs-on: ${{ github.repository == 'gastownhall/gascity-packs' && 'blacksmith-32vcpu-ubuntu-2404' || 'ubuntu-24.04' }}
     steps:
       - name: Check out repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
@@ -30,6 +31,11 @@ jobs:
           go-version-file: slack-full/adapter/go.mod
           cache-dependency-path: |
             slack-full/cli/go.sum
+
+      - name: Install shell and native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ripgrep jq libicu-dev
 
       - name: Install Python test dependencies
         run: python3 -m pip install PyYAML pytest jsonschema

@@ -291,6 +291,12 @@ def write_city(
             [providers.claude]
             base = "builtin:claude"
 
+            [providers.codex]
+            base = "builtin:codex"
+
+            [providers.grok]
+            base = "builtin:grok"
+
             [[rigs]]
             name = "demo"
             """

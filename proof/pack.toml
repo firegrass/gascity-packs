@@ -1,0 +1,23 @@
+# The PROOF pack: the smallest Gas City configuration that can execute one
+# admitted backlog packet under this workspace's own rules.
+#
+# It is deliberately not the Gas Town team and not the upstream `gascity` build
+# pack. Both bring their own role set and, in the build pack's case, their own
+# artifact and review system. This workspace already has an evidence system
+# (AGENTS.md, the doctrine router, exact-tree validation); stacking a second one
+# on top is how two good ideas become something worse. This pack borrows the
+# upstream *patterns* instead:
+#
+#   - orchestrator-run `check` steps, so an agent cannot self-certify a gate;
+#   - a separate reviewer reached through `gc.run_target`;
+#   - positive authorization for every outward action, defaulting to off.
+#
+# Pack content is trusted operator code (docs/reference/trust-boundaries in the
+# Gas City docs). It is versioned here and deployed into the live city only at a
+# named commit with `gascity/deploy-pack.sh`, because a city hot-reloads its
+# config: an edit to a live pack directory changes agent prompts immediately.
+[pack]
+name = "proof"
+schema = 2
+version = "0.40.4"
+description = "PROOF pack: workers, an opt-in reviewer, a planner for bounded repair and requested shaping, a CI triage that answers a red pull request, a responder that finds the way forward for a red main, orchestrator-gated formulas for a packet, a planning run, a triage and a red-main response, admission that never becomes a second backlog, and the zero-token factory scripts around them — dispatcher, completer, plan trigger, CI triage, red-main responder, keeper, daily report."

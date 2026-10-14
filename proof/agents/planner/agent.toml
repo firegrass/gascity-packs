@@ -1,0 +1,66 @@
+description = "PROOF planner: repairs released stops and shapes up to three explicitly assigned existing items."
+scope = "rig"
+provider = "codex"
+
+# NOTE: no `prompt_template` key. `prompt.template.md` beside this file is
+# discovered by convention. An explicit relative path resolves against the PACK
+# ROOT, and a path that does not exist makes Gas City start the agent with NO
+# prompt at all, silently. Verify any change with
+#   gc prime --strict <rig>/proof.planner
+# — fully qualified, and expect empty output while the rig is suspended.
+
+# One conversation per STEP, not per run, and that is the point. The planner is
+# where this factory spends knowledge: it reads the knowledge documents, the
+# epic capsule, the decisions and the rig's knowledge export so that the workers
+# after it read almost nothing. A persistent planning agent is the expensive
+# shape — a long conversation re-reads its whole context on every tool call — so
+# a run starts fresh, reads once, and ends. `mol-proof-plan` has three steps for
+# that reason: the cost of `fresh` is paid three times, not nine.
+wake_mode = "fresh"
+
+# Owner, 2026-09-22: Opus 5.5 at the same xhigh effort as the 2026-09-21 pin.
+# `opus-5-5` is the city's explicit choice for `--model claude-opus-5-5`.
+# gc's built-in `opus` alias resolves to an older model, so do not substitute it.
+# Verify the actual resumed session command and its transcript after deployment.
+# The keeper records output per run; xhigh remains a measured owner choice.
+# Owner, 2026-09-27: the city is back on Claude Code after one day on Codex
+# (GPT-6 Sol), and every role runs Opus 5.5 at high effort. The notes above
+# record the earlier per-role pins this replaced.
+# Owner, 2026-10-07: replace Grok with GPT-6.1 Sol at high effort.
+# The city declares the exact Codex model choice.
+option_defaults = { model = "gpt-6.1-sol", effort = "high" }
+
+# One planning run at a time in a rig. Each run has its own worktree and branch
+# per target rig, so two could not collide — but a second concurrent run would
+# plan the same queue from the same reading, and the `plan_trigger` refuses to
+# start one while a planning bead is open anyway.
+max_active_sessions = 1
+min_active_sessions = 0
+idle_timeout = "1h"
+
+default_sling_formula = "mol-proof-plan"
+
+# A rig's `max_active_sessions` counts every session in it, including the core
+# control-dispatcher that executes formula control beads. The planner only ever
+# runs in the rig that owns the backlog, and that rig's policy `wip` is 1, so it
+# fits inside the configured 5: dispatcher + one worker + reviewer + planner.
+# Raise that rig's `wip` and the cap has to rise with it, or a planning run
+# queues behind a packet instead of starting.
+
+# Refuse to create a session unless the rig root is a clean, Gas City-owned
+# clone — the same guard the worker and the reviewer carry, for the same reason:
+# Gas City starts a rig-scoped agent in the rig root and assumes it owns that
+# checkout, and in this workspace the ordinary checkouts are shared.
+pre_start = [
+  "{{.CityRoot}}/packs/proof/assets/scripts/prestart-guard.sh \"{{.RigRoot}}\" \"{{.CityRoot}}\"",
+]
+
+# No Claude Code auto-memory. A rig's sessions all start in the rig root, so they
+# share one memory directory, and Claude Code loads its index into every session
+# that starts there. Workers had begun keeping per-packet "in-flight plan" files
+# in it: five packets' plans were being read by every later worker in the rig
+# (2026-09-20). A packet's plan belongs on its bead, where the next step of THAT
+# packet finds it; what the rig should know belongs in the repository's own
+# knowledge, which rig_context.py hands every worker.
+[env]
+CLAUDE_CODE_DISABLE_AUTO_MEMORY = "1"

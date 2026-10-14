@@ -1,0 +1,40 @@
+name: PROOF pack
+on:
+  push:
+    branches: [main]
+    paths: ['proof/**', '.github/workflows/proof.yml']
+  pull_request:
+    paths: ['proof/**', '.github/workflows/proof.yml']
+permissions:
+  contents: read
+jobs:
+  native:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: proof/work-helper/go.mod
+          cache-dependency-path: proof/work-helper/go.sum
+      - name: Install native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libicu-dev
+          mkdir -p "$RUNNER_TEMP/proof-bin"
+          curl --fail --location --retry 3 https://github.com/gastownhall/beads/releases/download/v1.3.1/beads_1.3.1_linux_amd64.tar.gz -o "$RUNNER_TEMP/bd.tar.gz"
+          tar -xzf "$RUNNER_TEMP/bd.tar.gz" -C "$RUNNER_TEMP/proof-bin"
+          curl --fail --location --retry 3 https://github.com/dolthub/dolt/releases/download/v2.3.5/dolt-linux-amd64.tar.gz -o "$RUNNER_TEMP/dolt.tar.gz"
+          tar -xzf "$RUNNER_TEMP/dolt.tar.gz" -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/proof-bin" >> "$GITHUB_PATH"
+          echo "$RUNNER_TEMP/dolt-linux-amd64/bin" >> "$GITHUB_PATH"
+      - name: Pure policies and native transaction qualification
+        run: |
+          python3 -m unittest discover -s proof/tests -v
+          python3 proof/assets/scripts/check_entrypoints.py proof
+          bash proof/tests/test_checks.sh
+          bash proof/tests/test_livetest_credentials.sh
+          python3 proof/tests/run_native.py

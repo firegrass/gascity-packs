@@ -1,0 +1,33 @@
+description = "PROOF red-main responder: one read-only recommendation for a red main, recorded as bead metadata."
+scope = "rig"
+provider = "codex"
+
+# NOTE: no `prompt_template` key. `prompt.template.md` beside this file is
+# discovered by convention. An explicit relative path resolves against the PACK
+# ROOT, and a path that does not exist makes Gas City start the agent with NO
+# prompt at all, silently. Verify with `gc prime <rig>/proof.responder`.
+
+wake_mode = "fresh"
+
+# Owner, 2026-09-22: Opus 5.5 at the same xhigh effort as the Opus 5 pin.
+# The city maps `opus-5-5` explicitly to `claude-opus-5-5`; the built-in `opus`
+# alias is older. This remains one bounded, read-only recommendation per red.
+# Owner, 2026-09-27: the city is back on Claude Code after one day on Codex
+# (GPT-6 Sol), and every role runs Opus 5.5 at high effort. The notes above
+# record the earlier per-role pins this replaced.
+# Owner, 2026-10-07: replace Grok with GPT-6.1 Sol at high effort.
+# The city declares the exact Codex model choice.
+option_defaults = { model = "gpt-6.1-sol", effort = "high" }
+
+# One response at a time in a rig. `main` has one head; a second concurrent
+# session would be answering the same red.
+max_active_sessions = 1
+min_active_sessions = 0
+idle_timeout = "1h"
+
+default_sling_formula = "mol-proof-red-main"
+
+# The same guard the worker, the reviewer, the planner and the triage carry.
+pre_start = [
+  "{{.CityRoot}}/packs/proof/assets/scripts/prestart-guard.sh \"{{.RigRoot}}\" \"{{.CityRoot}}\"",
+]

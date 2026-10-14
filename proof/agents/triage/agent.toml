@@ -1,0 +1,45 @@
+description = "PROOF CI triage: one read-only verdict on one red pull request, recorded as bead metadata."
+scope = "rig"
+provider = "codex"
+
+# NOTE: no `prompt_template` key. `prompt.template.md` beside this file is
+# discovered by convention. An explicit relative path resolves against the PACK
+# ROOT, and a path that does not exist makes Gas City start the agent with NO
+# prompt at all, silently. Verify any change with `gc prime <rig>/proof.triage`.
+
+# One conversation per triage. A triage is one question about one bounded
+# excerpt; there is nothing for a second turn to carry.
+wake_mode = "fresh"
+
+# The owner's choice: the strongest everyday model at a middling effort. The
+# reading is short — the causal failure and its log are already extracted, and
+# the packet's diffstat is a few lines — but the judgement is the whole of the
+# value, and a wrong `infrastructure` costs a re-run while a wrong `packet`
+# sends a worker to fix what it did not break. `opus-5-5` is declared in
+# city.toml's [[providers.claude.options_schema]] with an explicit model id; gc's
+# built-in `opus` choice is hard-wired to claude-opus-4-8, so naming it here
+# would be a downgrade. `gc config show --validate` checks none of this: read the
+# model a run actually used from its transcript.
+# Owner, 2026-09-27: the city is back on Claude Code after one day on Codex
+# (GPT-6 Sol), and every role runs Opus 5.5 at high effort. The notes above
+# record the earlier per-role pins this replaced.
+# Owner, 2026-10-07: replace Grok with GPT-6.1 Sol at high effort.
+# The city declares the exact Codex model choice.
+option_defaults = { model = "gpt-6.1-sol", effort = "high" }
+
+# One triage at a time in a rig. Reds arrive in ones, and a second concurrent
+# session would be judging a different packet's failure with the same worker
+# slots busy; `ci_triage.py` starts one per pass in any case.
+max_active_sessions = 1
+min_active_sessions = 0
+idle_timeout = "1h"
+
+default_sling_formula = "mol-proof-ci-triage"
+
+# Refuse to create a session unless the rig root is a clean, Gas City-owned
+# clone — the same guard the worker, the reviewer and the planner carry, for the
+# same reason: Gas City starts a rig-scoped agent in the rig root and assumes it
+# owns that checkout, and in this workspace the ordinary checkouts are shared.
+pre_start = [
+  "{{.CityRoot}}/packs/proof/assets/scripts/prestart-guard.sh \"{{.RigRoot}}\" \"{{.CityRoot}}\"",
+]

@@ -1,0 +1,65 @@
+description = "PROOF live tester, OBSERVE tier: read-only production reads. Holds a read-only Fly org token, so it cannot SSH and therefore cannot run liskov_ops at all."
+scope = "rig"
+provider = "codex"
+
+# CREDENTIAL TIER — verified 2026-09-21 against the live fleet.
+#
+# This agent's FLY_API_TOKEN must be a read-only org token:
+#   flyctl tokens create readonly -o <org> -n "proof-tester-observe" -x 720h
+#
+# Measured with such a token: `machines list`, `secrets list`, `logs` and
+# `status` all succeed; `ssh console` is REFUSED ("Not authorized to manage this
+# organization::feature" — SSH needs a WireGuard peer). Because every liskov_ops
+# verb is reached through `fly ssh console -C`, a readonly token cannot run one.
+#
+# The token is NOT set here. A pack is committed to git and a token is a secret,
+# so the operator injects it in the machine-local city config as a rig agent
+# patch — see `gascity/city.reference.toml`. With no token injected this agent
+# has no Fly credential at all, which is the correct fail-closed default: the
+# preflight credential check refuses the packet.
+#
+# It cannot travel as a formula var either: Gas City's trust model classifies
+# formula vars as untrusted data. Per-agent `
+
+# The prompt is SHARED by all three tier agents and lives at
+# `assets/prompts/tester.md`. An explicit relative path resolves against
+# the PACK ROOT, and a path that does not exist makes Gas City start the agent
+# with NO prompt at all, silently. The `worker-isolation` doctor check fails
+# when this path does not resolve; verify any change with
+#   gc prime <rig>/proof.tester-observe
+prompt_template = "assets/prompts/tester.md"
+
+# One conversation per live test. A live test is a sequence of readings whose
+# meaning depends on the ones before it; restarting the conversation per bead
+# would discard the run's own context.
+wake_mode = "resume"
+
+# Owner, 2026-09-22: Opus 5.5 at the same xhigh effort, so the personal default cannot leak in.
+# Owner, 2026-09-27: the city is back on Claude Code after one day on Codex
+# (GPT-6 Sol), and every role runs Opus 5.5 at high effort. The notes above
+# record the earlier per-role pins this replaced.
+# Owner, 2026-10-07: replace Grok with GPT-6.1 Sol at high effort.
+# The city declares the exact Codex model choice.
+option_defaults = { model = "gpt-6.1-sol", effort = "high" }
+
+# One live test runs at a time across the whole fleet (ADR-0151 clause 5), so a
+# tier agent never needs more than one session. The fleet-wide slot is enforced
+# by the dispatcher; this cap makes a single tier's own over-scheduling
+# impossible as well.
+max_active_sessions = 1
+min_active_sessions = 0
+idle_timeout = "1h"
+
+default_sling_formula = "mol-proof-livetest"
+
+pre_start = [
+  "{{.CityRoot}}/packs/proof/assets/scripts/prestart-guard.sh \"{{.RigRoot}}\" \"{{.CityRoot}}\"",
+]
+
+# [env] MUST be last: in TOML every key after a table header belongs to that
+# table, and with this block placed earlier the scalars above silently became
+# `env.option_defaults`, `env.wake_mode` and so on. `gc lint` catches it; a
+# plain TOML parse does not, because the result is valid TOML and wrong.
+[env]
+CLAUDE_CODE_DISABLE_AUTO_MEMORY = "1"
+LISKOV_LIVETEST_EXERCISE = "observe"

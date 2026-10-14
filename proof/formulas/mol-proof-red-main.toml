@@ -1,0 +1,89 @@
+description = """
+One response to one red `main`: read the facts, recommend the way forward,
+close. Nothing else.
+
+The session is READ-ONLY and its whole output is a recommendation on its own
+bead, because `main` is the branch that deploys. `red_main.py` reads the
+recommendation on its next pass and does only what the rig is authorized to do
+— which, at most, is open a revert pull request nobody has merged. The
+responder never pushes to `main`, never merges, never cancels a run and never
+re-runs main's own delivery pipeline.
+
+The facts are established before the session starts: the first-red walk along
+main's first-parent chain, the commit it attributes the red to, whether that
+commit is a packet this factory merged, and — kept separate on purpose — the
+scheduled failures on main's current head, with how many of each workflow's
+previous runs also failed.
+
+Launched by `red_main.py` when main is red or a scheduled check on its head is,
+and the policy's `[red_main]` table allows it. Do not sling this formula by hand.
+"""
+formula = "mol-proof-red-main"
+
+[requires]
+formula_compiler = ">=2.0.0"
+
+[vars]
+
+[vars.rig]
+description = "Rig whose main is red. Identity only; never interpolated into a shell."
+required = true
+pattern = "^[A-Za-z0-9._-]+$"
+
+[[steps]]
+id = "decide"
+title = "Find the way forward for {{rig}}'s red main"
+description = """
+Read your bead. It holds the facts, already established:
+
+```bash
+gc convoy status {{convoy_id}} --json
+gc bd show <your bead id>
+```
+
+`main` being red stops every deploy for everyone, and a wrong move costs more
+than the red does. ADR-0115 is the authority and it is not yours to reinterpret:
+**a red `main` belongs to the merge that turned it red**, and the rule for a red
+you do not own is **revert, not fix**.
+
+Recommend exactly one:
+
+- `revert` — the owning commit is established, the red is real, and backing it
+  out is the shortest way to green. The script will open a revert pull request
+  if the rig is authorized; **it will not merge it**, and neither will you.
+- `fix_forward` — only ever available when the facts say `ours: yes`, i.e. the
+  red belongs to a packet this factory merged. It is a recommendation to send
+  that packet back to a worker, and it still goes to a person. If the facts say
+  `ours: no`, this option does not exist for you — say `revert` or `person`.
+- `rerun` — the failure is infrastructure and a re-run would clear it. Note that
+  the script will only ever re-run a **standing scheduled** run; a red push
+  pipeline on main is a person's call.
+- `person` — anything else, and anything you are not sure of. That includes a
+  red whose walk is marked bounded ("the red begins at or BEFORE the oldest head
+  examined"), a red with several plausible owners, and a scheduled red that is
+  red by design until someone provisions something.
+
+Then record it and close:
+
+```bash
+gc bd update <your bead id> \
+  --set-metadata proof.red_recommendation=<revert|fix_forward|rerun|person> \
+  --set-metadata proof.red_confidence=<high|medium|low> \
+  --set-metadata gc.outcome=pass \
+  --set-metadata gc.work_outcome=no-op
+gc bd note <your bead id> "<the reason: what is red, who owns it, what you ruled out, and what a person should do next>"
+gc bd close <your bead id> --reason "red main: <recommendation>"
+```
+
+A close with no `proof.red_recommendation` is read as "no recommendation" and
+mailed to a person — so answer `person` and say why, rather than closing
+silently.
+
+You may read the repository, the failing run and the owning commit to decide.
+You may not change anything, anywhere.
+"""
+metadata = { "gc.run_target" = "proof.responder" }
+
+[steps.retry]
+max_attempts = 2
+on_exhausted = "hard_fail"

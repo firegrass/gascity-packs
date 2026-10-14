@@ -1,0 +1,668 @@
+description = """
+Execute one admitted PROOF backlog packet, end to end.
+
+The orchestrator — not an agent — decides whether the work is done: the
+`implement` step closes only when the rig's gate command passes on the committed
+tree. When the packet was admitted with review, the `review-cycle` step closes
+only when an independent reviewer has approved that exact tree; without it the
+gated tree is the approved tree, and the repository's own CI is the next check. Every outward action (push, pull request, auto-merge,
+landing on main) is a separate step that exists only when the packet was
+admitted with positive authorization for it; all default to off.
+
+Landing on main is the one outward action no agent performs. The worker prepares
+the landing commit — the backlog item completed, origin's main integrated — and
+the orchestrator's own check decides whether that commit is still what was
+reviewed, gates its tree, and pushes it. See `checks/land-on-main.sh`.
+
+Launch with `gc proof admit <BKLG-id>`, which creates the packet worktree, the work
+bead, and supplies the variables. Do not sling this formula by hand.
+"""
+formula = "mol-proof-packet"
+
+[requires]
+formula_compiler = ">=2.0.0"
+
+[vars]
+
+[vars.contract_required]
+description = "Admission requires a durable execution contract; absent only for legacy workflows."
+default = "false"
+enum = ["true", "false"]
+
+[vars.contract_id]
+description = "Content identity persisted by the admission controller before launch."
+default = ""
+pattern = "^([0-9a-f]{64})?$"
+
+[vars.contract_attempt]
+description = "Durable launch identity; recovery matches this exact attempt."
+default = ""
+pattern = "^([0-9a-f]{32})?$"
+
+[vars.packet_id]
+description = "Backlog item id this workflow executes, e.g. BKLG-20260918-ab12. Identity only; never interpolated into a shell."
+required = true
+pattern = "^BKLG-[0-9]{8}-[a-z0-9]{4}$"
+
+[vars.work_dir]
+description = "Absolute path of the packet worktree, created by admission at the workspace's standard location."
+required = true
+pattern = "^/[A-Za-z0-9._/-]+$"
+
+[vars.branch]
+description = "Packet branch checked out in the worktree."
+required = true
+pattern = "^agent/[A-Za-z0-9._-]+$"
+
+[vars.base_branch]
+description = "Branch the packet was cut from and will land on."
+default = "main"
+
+[vars.gate_command]
+description = "Repository-owned validation command the ORCHESTRATOR runs in the worktree. Set per rig in city.toml [rigs.formula_vars]; never supplied from a bead."
+default = ""
+
+[vars.gate_path]
+description = "Directories prepended to PATH for the gate command only. Gas City runs check scripts with a minimal PATH and HOME set to the city, which hides a toolchain installed under the operator's home. Set per rig in city.toml [rigs.formula_vars]."
+default = ""
+pattern = "^(/[A-Za-z0-9._/-]+(:/[A-Za-z0-9._/-]+)*)?$"
+
+[vars.gate_home]
+description = "HOME for the gate command only, when its toolchain resolves state from the operator's home (rustup, the cargo registry, the build cache). Set per rig in city.toml [rigs.formula_vars]."
+default = ""
+pattern = "^(/[A-Za-z0-9._/-]+)?$"
+
+[vars.prior_commit]
+description = "Set by admission when a packet is re-admitted after a stopped workflow: the commit an earlier attempt left on the packet branch. Empty on a first admission."
+default = ""
+pattern = "^([0-9a-f]{40})?$"
+
+[vars.review]
+description = "Positive authorization for an independent review before anything outward. Off by default: the orchestrator's diff-aware gate is then the only check before the repository's own CI. Admission turns it on with --review, and the dispatcher's policy turns it on by write-scope pattern (SQL, migrations, money, shared contracts)."
+default = "false"
+enum = ["true", "false"]
+
+[vars.review_target]
+description = "Agent that reviews the change."
+default = "proof.reviewer"
+
+[vars.recovery_trial]
+description = "Operator-selected bounded recovery trial, stamped by admission. Empty keeps the usual workflow."
+default = ""
+pattern = "^([a-z0-9-]{1,80})?$"
+
+[vars.gate_lane]
+description = "Run the rig's gate as its own `gate` step on the zero-token gater pool, so the control dispatcher never holds a gate. Set per rig in city.toml [rigs.formula_vars]; off by default, and then the implement check runs the gate inline as before."
+default = "false"
+enum = ["true", "false"]
+
+[vars.gate_timeout]
+description = "Hard deadline for the gate command, independent of interactive-session idle detection."
+default = "90m"
+pattern = "^[1-9][0-9]*[smh]$"
+
+[vars.gate_target]
+description = "Agent that runs the gate step when gate_lane is on."
+default = "proof.gater"
+
+[vars.push]
+description = "Positive authorization to push the packet branch."
+default = "false"
+enum = ["true", "false"]
+
+[vars.open_pr]
+description = "Positive authorization to open a pull request. Requires push."
+default = "false"
+enum = ["true", "false"]
+
+[vars.automerge]
+description = "Positive authorization to arm the repository's auto-merge. Requires open_pr."
+default = "false"
+enum = ["true", "false"]
+
+[vars.land_main]
+description = "Positive authorization to complete the backlog item and land on base_branch directly. Only for a repository whose own rules land on main without a pull request; admission refuses it elsewhere. Excludes push, open_pr and automerge."
+default = "false"
+enum = ["true", "false"]
+
+[vars.item_path]
+description = "Repository-relative path of the packet's backlog item. Supplied by admission; the landing check uses it to tell completion from an unreviewed edit."
+default = ""
+pattern = "^(docs/backlog/items/BKLG-[0-9]{8}-[a-z0-9]{4}-[A-Za-z0-9._-]+[.]md)?$"
+
+[vars.shared_checkout]
+description = "A checkout other sessions read, fast-forwarded (never more) after a landing. Set per rig in city.toml [rigs.formula_vars]; empty disables it."
+default = ""
+pattern = "^(/[A-Za-z0-9._/-]+)?$"
+
+[[steps]]
+id = "load-context"
+title = "Load the packet and the rules that govern it"
+description = """
+Understand the assignment before touching anything.
+
+```bash
+gc prime
+CONVOY_STATUS=$(gc convoy status {{convoy_id}} --json)
+WORK_BEAD_ID=$(printf '%s' "$CONVOY_STATUS" | jq -r 'if (.children | length) == 1 then .children[0].id else empty end')
+[ -n "$WORK_BEAD_ID" ] || { echo "expected an input convoy with exactly one member" >&2; exit 1; }
+gc bd show "$WORK_BEAD_ID"
+```
+
+The work bead is packet {{packet_id}}. Read:
+
+1. in the packet worktree `{{work_dir}}`, the repository's `AGENTS.md` if it has
+   one (and, in the orchestrator, `docs/README.md`). Many member repositories
+   have no `AGENTS.md` and no doctrine router of their own; that is expected,
+   not a missing rule set and not a reason to stop — the work bead says so, and
+   the workspace router is run from the orchestrator clone, never your worktree;
+2. the backlog item, at the absolute path the work bead gives — for any
+   repository but the orchestrator it is in a different, read-only clone — then
+   every document in its `reads` and the capsule its epic names, resolved
+   relative to that file;
+3. the conditional doctrine the work bead lists under "Required reading". A
+   script chose it from the item's write_scope with the workspace's and the
+   repository's own routers, so you do not hunt for it: read the bodies whose
+   path trigger matched, and those judgement triggers that describe your change;
+4. the validation commands the item and the repository's rules select for it.
+
+The bead is meant to be enough. Read what it and the item name; do not read the
+workspace to be safe — that costs the packet tokens on every later turn.
+
+Do not change anything in this step. If the packet is unclear, contradicts the
+repository's rules, or would need an action it does not authorize, close this
+bead as a HARD failure with the reason — that is a good outcome, and it stops
+the packet: nothing after this step runs.
+
+Recovery trial = `{{recovery_trial}}`. When non-empty, investigate a questionable
+premise before declaring it terminal. Own the agreed outcome; implementation
+hints are guidance, while explicit acceptance, repository doctrine and authority
+remain binding. A missing reviewer is recoverable within this packet: use
+`recovery_review.py require <this bead> --rig <rig>` as your worker instructions
+describe, then proceed. Ordinary forced companions remain allowed by ADR-0159.
+
+Re-admission: prior_commit = `{{prior_commit}}`. When that is not empty, an
+earlier workflow for this packet stopped after committing, and admission
+recorded that commit. Finding exactly that commit on the packet branch is
+expected and is NOT someone else's work; the `workspace` step verifies it.
+"""
+# A member of the body scope with abort_scope, NOT a free-standing step. `needs`
+# only orders steps: failure propagates through scope membership alone. While
+# this step stood outside the scope, a worker that hard-failed it — "this packet
+# is wrong, stop" — was ignored, and the packet ran on to an open pull request.
+metadata = { "gc.scope_ref" = "body", "gc.scope_role" = "member", "gc.on_fail" = "abort_scope", "gc.continuation_group" = "main", "gc.session_affinity" = "require" }
+
+[steps.retry]
+max_attempts = 3
+on_exhausted = "hard_fail"
+
+[[steps]]
+id = "body"
+title = "Packet body scope"
+needs = ["load-context", "workspace", "implement", "review-cycle", "push", "open-pr", "arm-automerge", "land", "report"]
+description = """
+Terminal latch for the packet. Members fail fast: when one fails, the
+orchestrator skips the rest and closes this bead with the failure, so a failed
+gate or a rejected review can never be followed by a push.
+"""
+metadata = { "gc.kind" = "scope", "gc.scope_name" = "packet", "gc.scope_role" = "body" }
+
+[[steps]]
+id = "workspace"
+title = "Verify the packet worktree"
+needs = ["load-context"]
+description = """
+Admission already created the worktree. Verify it; do not create another.
+This is the initial workspace check. Later review-fix beads consume the same
+workflow's reviewed implementation under their own explicit handoff below;
+do not reapply this initial-ownership check to those later beads.
+
+```bash
+cd {{work_dir}}
+git fetch --prune origin
+test "$(git rev-parse --abbrev-ref HEAD)" = "{{branch}}"
+test -z "$(git status --porcelain)"
+git merge-base --is-ancestor origin/{{base_branch}} HEAD \
+  || echo "branch is not based on current origin/{{base_branch}}"
+```
+
+If the worktree is missing, dirty, on another branch, or carries commits you did
+not make, close this bead as a HARD failure. Do not clean, reset or rebuild it.
+
+One exception, and only this one: prior_commit = `{{prior_commit}}`. When that is
+not empty, this packet was re-admitted after an earlier workflow stopped, and
+admission recorded the commit that attempt left on this branch. Then HEAD must be
+exactly that commit — `test "$(git rev-parse HEAD)" = "{{prior_commit}}"` — and
+those commits are this packet's own work, not someone else's. Any other commit
+is still a HARD failure.
+If the branch is merely behind `origin/{{base_branch}}` and has no commits of
+its own yet, fast-forward it (`git merge --ff-only origin/{{base_branch}}`).
+"""
+metadata = { "gc.scope_ref" = "body", "gc.scope_role" = "setup", "gc.on_fail" = "abort_scope", "gc.continuation_group" = "main", "gc.session_affinity" = "require" }
+
+[steps.retry]
+max_attempts = 2
+on_exhausted = "hard_fail"
+
+[[steps]]
+id = "implement"
+title = "Implement packet {{packet_id}} until its gate passes"
+needs = ["workspace"]
+description = """
+Implementation loop. Each iteration is the worker's change (`code`), then, when
+the rig runs its gate as a separate step, the gate on the committed tree
+(`gate`). The orchestrator's check closes the loop only when the gate has passed
+on the exact tree at HEAD; otherwise it starts the next iteration.
+"""
+metadata = { "gc.scope_ref" = "body", "gc.scope_role" = "member", "gc.on_fail" = "abort_scope" }
+
+[steps.check]
+max_attempts = 3
+
+[steps.check.check]
+mode = "exec"
+path = "../assets/scripts/checks/packet-gates.sh"
+# 90 min (owner, 2026-10-07): a large liskov-rs diff gated in 63 min. With the
+# gate lane on, the check only reads the gate step's record and takes seconds;
+# the timeout bounds legacy workflows without the gate lane.
+timeout = "90m"
+
+[[steps.children]]
+id = "code"
+title = "Implement packet {{packet_id}}"
+description = """
+Make the change packet {{packet_id}} asks for, in `{{work_dir}}` on branch
+`{{branch}}`, and commit it. Stage by path; never `git add -A`.
+
+This step is not done when you say so. After you close it, the ORCHESTRATOR
+checks the worktree itself and re-issues the step if any of these is false:
+
+- everything is committed — the tree it validates must be the tree you submit;
+- the branch has at least one commit ahead of `origin/{{base_branch}}`;
+- the rig's gate passes in the worktree: `{{gate_command}}`. When this rig runs
+  its gate as a separate step (gate_lane = `{{gate_lane}}`), the gater runs it on
+  your committed tree right after you close; you still run it yourself first.
+
+If prior_commit (`{{prior_commit}}`) is not empty, an earlier attempt already
+committed this packet's change and was stopped before it could be gated or
+reviewed. Do not redo it and do not rewrite it: read it against the item, run the
+validation, and add a commit only if something is actually wrong or missing.
+
+The work bead's required reading was routed from the scope the item DECLARES.
+Before closing, run the router(s) it names with `--for <the paths you actually
+changed>` and read any body that is new.
+
+Run the gate yourself before closing. Add whatever else the repository's rules
+select for your diff (its `AGENTS.md` and the ci-preflight skill decide that);
+the configured gate is the floor, not the ceiling. If this bead is a re-issued
+iteration, the previous check failed: find out why and fix that.
+
+For recovery trial `{{recovery_trial}}`, keep investigating and repairing within
+the agreed outcome and authority. Record concise checkpoints: what you tried,
+what changed, owned commits and the next useful experiment. If the trial is
+non-empty and review = `{{review}}` is false, submit the clean candidate with
+`recovery_review.py wait <this bead>
+--rig <rig>`. Wait in that script, not repeated model turns. `iterate` means
+repair its findings in THIS step and submit the new tree; `reject` or three
+reviewed candidates needs a design decision. Close only after exact-tree
+approval. Required review that was already admitted still runs in the normal
+review cycle. Do not weaken acceptance or repository checks to finish.
+
+Close it `shipped` with `gc.work_commit` set to HEAD and
+`gc.work_branch={{branch}}` in the same update. The claim stamped this bead
+with the rig root's branch (`main`); your close update is what the work-record
+gate checks.
+"""
+metadata = { "gc.continuation_group" = "main" }
+
+[[steps.children]]
+id = "gate"
+title = "Gate packet {{packet_id}} on its committed tree"
+needs = ["code"]
+condition = "{{gate_lane}} == true"
+description = """
+Run by the zero-token gater (`assets/scripts/gater.sh`), never by a model. It
+runs the rig's gate in `{{work_dir}}` on the committed tree, records
+`proof.gate_tree`, `proof.gate_result` and the log tail on this bead, and
+closes it `gc.outcome=pass` whatever the gate said: the implement check reads
+the record and decides.
+"""
+metadata = { "gc.run_target" = "{{gate_target}}" }
+
+[[steps]]
+id = "review-cycle"
+title = "Independent review until approved"
+needs = ["implement"]
+condition = "{{review}} == true"
+description = """
+Review loop. Each iteration is the worker applying the PREVIOUS review's
+findings, then an independent review of the tree that leaves. A review is always
+the last thing in an iteration, so every fix made in answer to a review is
+itself reviewed; the first iteration has nothing to apply. The orchestrator
+advances only when the latest verdict is `approve`, the reviewed tree is still
+the tree at HEAD, and the gates have passed on that tree. Stale review evidence
+blocks completion. When the last iteration's review is still not `approve`, the
+packet stops with `review_budget_exhausted` and the outstanding findings on the
+workflow root. When the rig runs its gate as a separate step (gate_lane =
+`{{gate_lane}}`), the gater gates the tree under review beside the review, so
+the check only reads the record.
+"""
+metadata = { "gc.scope_ref" = "body", "gc.scope_role" = "member", "gc.on_fail" = "abort_scope" }
+
+[steps.check]
+max_attempts = 3
+
+[steps.check.check]
+mode = "exec"
+path = "../assets/scripts/checks/review-verdict.sh"
+# 90 min (owner, 2026-10-07): a large liskov-rs diff gated in 63 min.
+timeout = "90m"
+
+# Findings are applied at the START of an iteration, not at the end. With the
+# fix last (as before 2026-10-09) the final iteration's fix could never be
+# reviewed: BKLG-20261004-axhn's third review said `iterate`, apply-findings
+# committed 258110246, and the loop then ran out with that commit unreviewed.
+[[steps.children]]
+id = "apply-findings"
+title = "Apply the previous review's findings"
+description = """
+You apply the findings of the review that closed in the PREVIOUS iteration of
+this loop. On the first iteration there is none: the orchestrator normally
+closes this bead itself before any worker sees it; if you do receive it and no
+review has closed under this workflow yet, change nothing and close it with
+`gc.outcome=pass` and `gc.work_outcome=no-op`.
+
+Find that review: the latest closed bead under the workflow root
+(`gc bd list --all --metadata-field gc.root_bead_id=<root id> --json --limit=0`)
+that carries `proof.review_verdict`; `gc bd show <id>` shows its notes.
+
+The implementation commits made by earlier steps of THIS workflow are the
+authorized input to this bead, even when a different worker session made them.
+`prior_commit` authorizes an initial re-admission; it is not required again for
+this review handoff. Before acting, verify the named worktree is clean, is on
+`{{branch}}`, and `git rev-parse HEAD^{tree}` equals that review's recorded
+`proof.reviewed_tree`. Missing review evidence, a different tree/branch or a
+dirty worktree is a HARD failure. Do not adopt unrelated commits or changes.
+
+- `iterate` — fix exactly the findings in `{{work_dir}}`, re-run
+  `{{gate_command}}`, commit by path, then close with `gc.outcome=pass`,
+  `gc.work_outcome=shipped`, `gc.work_commit` = HEAD and
+  `gc.work_branch={{branch}}`. The review that follows in this iteration
+  reviews your fix.
+- `approve` — the review approved, so the check failed on the gate for that
+  tree: its `review-gate` bead records `proof.gate_result=fail` and the log
+  tail. Fix what the gate reports, re-run `{{gate_command}}`, commit by path and
+  close as for `iterate`. If you find no gate failure, change nothing and close
+  `gc.outcome=pass`, `gc.work_outcome=no-op`.
+- `reject` — change nothing. Close this bead as a HARD failure with reason
+  `review_rejected`. Do not argue with the verdict in code.
+"""
+# Read by the implement check (`packet-gates.sh`): a first iteration's
+# apply-findings with this marker has nothing to apply, and the check closes it
+# so the first review does not wait for a worker. A root compiled from the
+# older order has no marker, and its apply-findings is never touched.
+metadata = { "gc.continuation_group" = "review-fixes", "proof.applies" = "previous-review" }
+
+[[steps.children]]
+id = "review"
+title = "Review packet {{packet_id}}"
+needs = ["apply-findings"]
+description = """
+Review the change on branch `{{branch}}` in `{{work_dir}}` against
+`origin/{{base_branch}}`:
+
+```bash
+git -C {{work_dir}} diff origin/{{base_branch}}...HEAD
+```
+
+Judge it against the work bead's acceptance criteria (find it with
+`gc convoy status {{convoy_id}} --json`), the repository's `AGENTS.md` where it
+has one, and correctness. When an earlier review under this workflow asked for
+changes, check that its findings were addressed.
+
+The orchestrator's own gate for this rig is exactly `{{gate_command}}` and
+nothing more. Everything else the item's `validation` and the repository's rules
+select — tests, lints, contract checks — is NOT run by the orchestrator. Do not
+assume it was: run those commands yourself on this tree when they are cheap, and
+otherwise say in your findings which ones you did not run. A check the
+repository's required pull-request CI runs is not unrun: name it as left to
+CI (the gate's log lists the lanes it left there). An approval that leaves a
+selected check unrun by anyone is an `iterate`.
+
+You are read-only. Record `proof.review_verdict`
+(approve | iterate | reject) and `proof.reviewed_tree` on THIS bead, put the
+findings in its notes, and close it with `gc.outcome=pass`.
+"""
+metadata = { "gc.run_target" = "{{review_target}}" }
+
+[[steps.children]]
+# Not `gate`: a step id is unique across the whole formula.
+id = "review-gate"
+title = "Gate packet {{packet_id}} on the tree under review"
+needs = ["apply-findings"]
+condition = "{{gate_lane}} == true"
+description = """
+Run by the zero-token gater (`assets/scripts/gater.sh`), never by a model, at the
+same time as the review and on the same committed tree: neither changes it, and
+nothing follows them in the iteration. A tree that already passed a gate (the
+first review's, normally) is recorded as a pass without building again. It
+records `proof.gate_tree`, `proof.gate_result` and the log tail on this bead and
+closes it `gc.outcome=pass` whatever the gate said: the review check reads the
+record and decides.
+"""
+metadata = { "gc.run_target" = "{{gate_target}}" }
+
+[[steps]]
+id = "push"
+title = "Push the packet branch"
+# `implement` is named beside `review-cycle` on purpose: a step whose condition is
+# false is dropped from the graph together with every `needs` that names it, so a
+# step that needed only the optional review would otherwise start at once.
+needs = ["implement", "review-cycle"]
+condition = "{{push}} == true"
+description = """
+Authorized: push. Publish the approved branch and nothing else.
+
+The commits on `{{branch}}` were made by earlier steps of THIS workflow —
+`implement`, `apply-findings`, a merge of `{{base_branch}}` — usually in another
+worker session. They are this packet's own work and the reason this step
+exists; that another session made them is not a reason to stop, and no
+`prior_commit` is needed. What authorizes the push is the approval the workflow
+root recorded. Check it first (`<this bead>` is the id you claimed):
+
+```bash
+cd {{work_dir}}
+ROOT="$(gc bd show <this bead> --json | jq -r '(if type=="array" then .[0] else . end).metadata["gc.root_bead_id"]')"
+APPROVED="$(gc bd show "$ROOT" --json | jq -r '(if type=="array" then .[0] else . end).metadata["proof.approved_commit"] // empty')"
+test -n "$APPROVED" && test "$(git rev-parse HEAD)" = "$APPROVED"
+test "$(git branch --show-current)" = "{{branch}}" && test -z "$(git status --porcelain)"
+```
+
+If any check fails — no recorded approval, HEAD is not the approved commit,
+another branch, or a dirty worktree — close this bead as a HARD failure and
+change nothing. Otherwise push:
+
+```bash
+git push -u origin {{branch}}
+test "$(git rev-parse HEAD)" = "$(git ls-remote origin refs/heads/{{branch}} | cut -f1)"
+```
+
+This is idempotent: if the branch is already up to date on the remote, that is
+success. Never force-push. Do not open a pull request here.
+"""
+metadata = { "gc.scope_ref" = "body", "gc.scope_role" = "member", "gc.on_fail" = "abort_scope", "gc.continuation_group" = "publish" }
+
+[steps.retry]
+max_attempts = 2
+on_exhausted = "hard_fail"
+
+[[steps]]
+id = "open-pr"
+title = "Open the pull request"
+needs = ["push"]
+condition = "{{open_pr}} == true"
+description = """
+Authorized: open a pull request for `{{branch}}` into `{{base_branch}}`.
+The branch carries commits earlier steps of this workflow made, in other
+sessions; the `push` step already checked them against the workflow root's
+`proof.approved_commit`. They are this packet's own work, not a reason to stop.
+
+Create it only if absent — this step may run more than once:
+
+```bash
+cd {{work_dir}}
+gh pr list --head {{branch}} --state open --json number,url
+```
+
+If one exists, record its URL and finish. Read mergeability once when recording
+it. A confirmed conflict is a PR delivery recovery incident: record that fact
+and finish the handoff; the PR recovery controller observes it after this
+workflow closes. Never wait or start another worker yourself. Otherwise create it following the
+repository's pull-request conventions, referencing {{packet_id}}. Record the URL
+on the work bead as `proof.pr_url`. Do not merge, and do not arm auto-merge here.
+
+A repository's landing doc may say to arm auto-merge in the session that opens
+the pull request (liskov-rs: `docs/agents/landing-and-red-main.md`). That is not
+a conflict to report. The split is deliberate: arming is a separate outward
+action with its own authorization (automerge = `{{automerge}}`), and when it is
+authorized the `arm-automerge` step that follows this one arms it.
+"""
+metadata = { "gc.scope_ref" = "body", "gc.scope_role" = "member", "gc.on_fail" = "abort_scope", "gc.continuation_group" = "publish" }
+
+[steps.retry]
+max_attempts = 2
+on_exhausted = "hard_fail"
+
+[[steps]]
+id = "arm-automerge"
+title = "Arm the repository's auto-merge"
+needs = ["open-pr"]
+condition = "{{automerge}} == true"
+description = """
+Authorized: arm auto-merge on the pull request, using the merge method the
+repository's `AGENTS.md` prescribes. The pull request's commits are this
+packet's own, made by earlier steps of this workflow in other sessions. Arming
+is idempotent. Do not wait for checks, do not poll CI, and do not merge by hand.
+
+This step and `open-pr` together carry out the landing the repository's doc
+describes (liskov-rs: `docs/agents/landing-and-red-main.md`). The split is
+deliberate, so it is not a conflict to report. That doc also asks for one
+check-back before the packet is called done. After arming, read the pull
+request's state **once** and record what you saw on the work bead:
+
+```bash
+gh pr view <n> --json state,mergedAt,mergeCommit,autoMergeRequest
+```
+
+If it has already merged, you may also read the merge commit's required check
+once, as the doc shows. Otherwise put the PR number in your close note and say
+the merge was not observed. Read each of these once only, with no sleeping and
+no retrying. The `report` step records the rest.
+"""
+metadata = { "gc.scope_ref" = "body", "gc.scope_role" = "member", "gc.on_fail" = "abort_scope", "gc.continuation_group" = "publish" }
+
+[steps.retry]
+max_attempts = 2
+on_exhausted = "hard_fail"
+
+[[steps]]
+id = "land"
+title = "Complete the item and prepare the landing on {{base_branch}}"
+needs = ["implement", "review-cycle"]
+condition = "{{land_main}} == true"
+description = """
+Authorized: land packet {{packet_id}} on `{{base_branch}}`. You prepare the
+landing commit. You do NOT push it: after you close this step the ORCHESTRATOR
+checks the commit and pushes it itself. Never run `git push` to
+`{{base_branch}}`, and never rebase, amend or reset — the approved commit must
+stay in your history exactly as it was reviewed.
+
+Work in `{{work_dir}}`. Every part is idempotent; if this bead is a re-issued
+iteration, the landing was refused — read why first, then redo only what it names:
+
+```bash
+( cd "$GC_RIG_ROOT" && GC_BEAD_ID=<this bead's id> \
+    "$GC_CITY"/packs/proof/assets/scripts/checks/land-on-main.sh --verify )
+```
+
+1. **Integrate while the index is clean**: `git fetch origin`. If HEAD does
+   not contain `origin/{{base_branch}}`, run
+   `git merge --no-ff --no-commit origin/{{base_branch}}`. A generated-view
+   conflict is expected: retain main's side and let step 3 regenerate it.
+   A conflict in any other path needs review: close this bead as a HARD failure
+   with `gc.failure_reason=integration_conflict`; do not resolve it yourself.
+   A prepared merge remains uncommitted until steps 2–4 finish.
+2. **Complete the item**, `{{item_path}}`, as the backlog's own procedure says
+   (`docs/backlog/README.md`, "Pull work"): `status: done`, `done_at: <today>`,
+   an `evidence:` list of links to what proves it, and the three claim fields
+   (`claimed_by`, `claimed_at`, `claim_expires`) removed. Change nothing else in
+   the file — not its body, not any other field. `git add` it. Staging completion
+   before step 1 would prevent Git from integrating main.
+3. **Regenerate and validate**, with the item staged:
+   `python3 scripts/validate_docs.py --refresh-epic-views`, `git add` exactly the
+   files it says it refreshed, then `{{gate_command}}`.
+4. **Commit** by path (or conclude the merge). The worktree must end clean.
+
+Then close this bead with `gc.outcome=pass`, `gc.work_outcome=shipped`,
+`gc.work_commit` = HEAD and `gc.work_branch={{branch}}`. The orchestrator lands the commit
+only if HEAD is built on the approved commit, contains `origin/{{base_branch}}`,
+changes nothing beyond what was reviewed plus the item's completion and
+generated views, and passes the gate on its final tree. If `{{base_branch}}`
+moves again before the checked landing starts, the trusted check integrates it
+in the packet's own worktree, restores only this item's completion and
+generated-view conflicts, regenerates views and gates the resulting tree. A
+changed task/claim, source conflict or changed reviewed file still refuses and
+needs intervention. `--verify` reports stale main without rewriting the branch.
+A writer outside the factory can still race the final non-forced push; on that
+refusal retry the check before repeating manual integration work.
+"""
+metadata = { "gc.scope_ref" = "body", "gc.scope_role" = "member", "gc.on_fail" = "abort_scope", "gc.continuation_group" = "publish" }
+
+[steps.check]
+max_attempts = 4
+
+[steps.check.check]
+mode = "exec"
+path = "../assets/scripts/checks/land-on-main.sh"
+timeout = "60m"
+
+[[steps]]
+id = "report"
+title = "Record what was done on the work bead"
+needs = ["implement", "review-cycle", "push", "open-pr", "arm-automerge", "land"]
+description = """
+Record the facts a human needs to finish packet {{packet_id}} on the work bead
+(find it with `gc convoy status {{convoy_id}} --json`):
+
+```bash
+cd {{work_dir}}
+gc bd update <work-bead-id> \
+  --set-metadata proof.branch={{branch}} \
+  --set-metadata proof.commit="$(git rev-parse HEAD)" \
+  --set-metadata proof.tree="$(git rev-parse 'HEAD^{tree}')" \
+  --set-metadata gc.work_outcome=shipped \
+  --set-metadata gc.work_commit="$(git rev-parse HEAD)" \
+  --set-metadata gc.work_branch={{branch}}
+```
+
+Append a short note: what changed, what you validated beyond the configured
+gate, anything the packet asked for that you did not do and why, and anything
+you found that needs a follow-up. Then close the WORK bead with a one-line
+reason — the orchestrator's finalize step closes the workflow, not the work bead,
+and an open work bead reads as a packet still in flight:
+
+```bash
+gc bd close <work-bead-id> --reason "packet {{packet_id}}: <branch>, <commit>, landing as authorized"
+```
+
+Completion (land_main = {{land_main}}): when that reads `true`, the `land` step
+has already completed the item and the orchestrator has landed it — say so in
+the note, with the landed commit from the workflow root's `proof.landed_commit`.
+Otherwise do NOT mark the backlog item done and do not edit it: for every other
+landing level completion waits until a person has seen the change land.
+"""
+metadata = { "gc.scope_ref" = "body", "gc.scope_role" = "member", "gc.on_fail" = "abort_scope", "gc.continuation_group" = "publish" }
+
+[steps.retry]
+max_attempts = 2
+on_exhausted = "hard_fail"

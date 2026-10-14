@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "proof.contract.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "id",
+    "packet",
+    "rig",
+    "repository",
+    "item_path",
+    "task_digest",
+    "base",
+    "docs_revision",
+    "recipe_digest",
+    "acceptance",
+    "sources",
+    "prerequisites",
+    "claim",
+    "publication",
+    "scope",
+    "validation",
+    "execution"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string"
+    },
+    "id": {
+      "type": "string"
+    },
+    "packet": {
+      "type": "string"
+    },
+    "rig": {
+      "type": "string"
+    },
+    "repository": {
+      "type": "string"
+    },
+    "item_path": {
+      "type": "string"
+    },
+    "task_digest": {
+      "type": "string"
+    },
+    "base": {
+      "type": "string"
+    },
+    "docs_revision": {
+      "type": "string"
+    },
+    "recipe_digest": {
+      "type": "string"
+    },
+    "acceptance": {
+      "type": "string"
+    },
+    "sources": {
+      "type": "object"
+    },
+    "prerequisites": {
+      "type": "object"
+    },
+    "claim": {
+      "type": "object"
+    },
+    "publication": {
+      "type": "object"
+    },
+    "scope": {
+      "type": "array"
+    },
+    "validation": {
+      "type": "array"
+    },
+    "execution": {
+      "type": "object"
+    }
+  }
+}

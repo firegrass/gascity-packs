@@ -1,0 +1,329 @@
+description = """
+Execute one admitted PROOF live-test packet against the deployed environment.
+
+There is no staging: every app this reaches serves real customers and spends
+real money. So the authorization axis is production action, not git action
+(ADR-0151). Admission sets an exercise level — `observe`, `mutate` or `spend` —
+and a step the packet did not authorize is **absent from the compiled graph**,
+not a step the tester is told to skip.
+
+The orchestrator — not the tester — decides what happened. `preflight` refuses
+before anything is touched, `observe` closes only when an orchestrator-run
+script has read the result itself, and `settle` is a teardown that runs when the
+exercise FAILED, which is exactly when the environment needs returning to the
+state preflight found. The tester's prose can mark nothing passed.
+
+Observe V1 (docs/knowledge/production-validation-observe-contract.md) compiles
+every authorization shape but only `observe` executes: admission refuses
+`mutate` and `spend` as not implemented. Each checked step has a single attempt,
+because re-issuing an observation must not buy extra reads of production.
+
+Launch with `gc proof admit <BKLG-id> --rig <rig> --exercise <level>`. Do not
+sling this formula by hand.
+"""
+formula = "mol-proof-livetest"
+
+[requires]
+formula_compiler = ">=2.0.0"
+
+[vars]
+
+[vars.packet_id]
+description = "Backlog item id this workflow executes, e.g. BKLG-20260918-ab12. Identity only; never interpolated into a shell."
+required = true
+pattern = "^BKLG-[0-9]{8}-[a-z0-9]{4}$"
+
+[vars.work_dir]
+description = "Absolute path of the packet worktree, created by admission. A live test changes no code: the only writes in it are the evidence record and the work note (ADR-0151 clause 2)."
+required = true
+pattern = "^/[A-Za-z0-9._/-]+$"
+
+[vars.live_target]
+description = "The named production surface this packet exercises, in place of the write_scope an implementation packet declares. Identity only: the target-to-origin mapping is trusted checked-in code, never a URL taken from a bead."
+required = true
+pattern = "^[a-z0-9][a-z0-9-]{0,62}$"
+
+[vars.mutate]
+description = "Positive authorization for production state changes that cost no money — a disposable canary, a controller toggle, settling a hold this packet created. Off by default. Admission turns it on with --exercise mutate, which observe V1 refuses as not implemented."
+default = "false"
+enum = ["true", "false"]
+
+[vars.spend]
+description = "Positive authorization for money-bearing production action. Requires mutate, and requires spend_cap to resolve at preflight to a fence production already enforces (ADR-0151 clause 3). Admission — not this formula — enforces both, and observe V1 refuses the level outright."
+default = "false"
+enum = ["true", "false"]
+
+[vars.spend_cap]
+description = "The cap this packet declares, for the record and for preflight to resolve against a named production fence. A STRING validated by pattern: the compiler parses vars.<name>.type and never enforces it, so nothing about enforcement may rest on this variable. A cap the tester merely respects is not a cap."
+default = ""
+pattern = '^([0-9]{1,9}([.][0-9]{1,6})?)?$'
+
+[vars.preflight_command]
+description = "Repository-owned refusal command the ORCHESTRATOR runs before any production contact. Set per rig in city.toml [rigs.formula_vars]; never supplied from a bead."
+default = ""
+
+[vars.settle_command]
+description = "Repository-owned teardown command the ORCHESTRATOR runs after the body, including when it failed. Set per rig in city.toml [rigs.formula_vars]; never supplied from a bead."
+default = ""
+
+[vars.gate_path]
+description = "Directories prepended to PATH for the orchestrator-run commands only. Gas City runs check scripts with a minimal PATH and HOME set to the city, which hides a toolchain installed under the operator's home. Set per rig in city.toml [rigs.formula_vars]."
+default = ""
+pattern = "^(/[A-Za-z0-9._/-]+(:/[A-Za-z0-9._/-]+)*)?$"
+
+[vars.gate_home]
+description = "HOME for the orchestrator-run commands only, when their toolchain resolves state from the operator's home. Set per rig in city.toml [rigs.formula_vars]."
+default = ""
+pattern = "^(/[A-Za-z0-9._/-]+)?$"
+
+[vars.tester_target]
+description = "Tier agent that performs the exercise, the way review_target names the reviewer in mol-proof-packet. One agent per exercise level because a token cannot travel per packet (ADR-0152). The pattern is closed on the three tiers so a run target cannot be redirected to an arbitrary agent. The CREDENTIAL never travels here: Gas City classifies formula vars as untrusted data, and each tier's token is injected as a machine-local per-agent patch."
+default = "proof.tester-observe"
+pattern = '^proof[.]tester-(observe|mutate|spend)$'
+
+[[steps]]
+id = "load-context"
+title = "Load the live-test packet and the rules that govern it"
+description = """
+Understand the assignment before reading anything in production.
+
+```bash
+gc prime
+CONVOY_STATUS=$(gc convoy status {{convoy_id}} --json)
+WORK_BEAD_ID=$(printf '%s' "$CONVOY_STATUS" | jq -r 'if (.children | length) == 1 then .children[0].id else empty end')
+[ -n "$WORK_BEAD_ID" ] || { echo "expected an input convoy with exactly one member" >&2; exit 1; }
+gc bd show "$WORK_BEAD_ID"
+```
+
+The work bead is live-test packet {{packet_id}} against `{{live_target}}`. Read:
+
+1. in `{{work_dir}}`, the repository's `AGENTS.md` if it has one (and, in the
+   orchestrator, `docs/README.md`) — a repository without one is expected;
+2. the backlog item, at the absolute path the work bead gives, then every
+   document in its `reads`, resolved relative to that file. A live-test item
+   declares a target and an exercise level, not a write scope;
+3. the admitted manifest the work bead names by digest and journal location.
+   That manifest — not this description, and not your reading of the item — is
+   what the run is permitted to do. An edited manifest refuses.
+
+Exercise level: mutate = {{mutate}}, spend = {{spend}}, declared cap
+`{{spend_cap}}`. A level you were not admitted at has no step in this graph.
+Nothing here authorizes a production write; `preflight` refuses first.
+
+Do not contact production in this step, and change nothing. If the packet is
+unclear, contradicts the repository's rules, names a target the item does not,
+or would need an action it does not authorize, close this bead as a HARD
+failure with the reason — that is a good outcome, and it stops the packet
+before it touches anything.
+"""
+# A member of the body scope with abort_scope, NOT a free-standing step. `needs`
+# only orders steps: failure propagates through scope membership alone, and a
+# hard failure here must stop the packet before preflight.
+metadata = { "gc.scope_ref" = "body", "gc.scope_role" = "member", "gc.on_fail" = "abort_scope", "gc.continuation_group" = "livetest", "gc.session_affinity" = "require", "gc.run_target" = "{{tester_target}}" }
+
+[steps.retry]
+max_attempts = 3
+on_exhausted = "hard_fail"
+
+[[steps]]
+id = "body"
+title = "Live-test body scope"
+needs = ["load-context", "preflight", "observe", "exercise", "evidence"]
+description = """
+Terminal latch for the live test. Members fail fast: when one fails, the
+orchestrator skips the rest and closes this bead with the failure, so a refused
+preflight can never be followed by an observation.
+
+`settle` and `report` are teardowns, not members, and therefore survive this —
+see their steps. Skipping settle is the worst outcome available: an `in_flight`
+target whose job ran never closes on its own, and one stranded hold has already
+blocked the next probe and silently switched a controller off.
+"""
+metadata = { "gc.kind" = "scope", "gc.scope_name" = "livetest", "gc.scope_role" = "body" }
+
+[[steps]]
+id = "preflight"
+title = "Refuse packet {{packet_id}} before any production contact"
+needs = ["load-context"]
+description = """
+The orchestrator runs `{{preflight_command}}` itself, through
+`checks/livetest-preflight.sh`, and its exit status — not your reading — decides
+whether this packet may proceed. The script calls `checks/livetest-credentials.sh`
+first: a tier credential that does not match the admitted level refuses here,
+before anything is touched.
+
+What it refuses on (ADR-0151 clause 4): the target is not `{{live_target}}`; the
+deployed build is not the SHA the manifest expects, read from the public
+`/readyz` `build` field and never from a Machine's environment, where a Fly
+secret can silently shadow the committed value; an observation the run depends
+on is stale; a hold or lease from an earlier packet is outstanding; or, at
+`spend`, the declared cap `{{spend_cap}}` does not resolve to a production fence
+the spending actor cannot widen.
+
+A refusal here costs nothing, which is the point. There is nothing for you to do
+in this step but record what it reports: do not re-run it by hand, do not read
+the target to check its answer, and never take an action to make it pass. If it
+refuses, that is the design working — close this bead with the refusal and let
+the packet stop.
+"""
+metadata = { "gc.scope_ref" = "body", "gc.scope_role" = "setup", "gc.on_fail" = "abort_scope", "gc.continuation_group" = "livetest", "gc.session_affinity" = "require", "gc.run_target" = "{{tester_target}}" }
+
+# One attempt. A preflight re-run is a second reading of production that the
+# admitted manifest did not budget, and its whole value is that it happens once,
+# before anything is touched.
+[steps.check]
+max_attempts = 1
+
+[steps.check.check]
+mode = "exec"
+path = "../assets/scripts/checks/livetest-preflight.sh"
+timeout = "30m"
+
+[[steps]]
+id = "observe"
+title = "Observe {{live_target}} for packet {{packet_id}}"
+needs = ["preflight"]
+description = """
+Read-only production reads, exactly the ones the admitted manifest registers.
+This step is always present: `observe` is the floor of the ladder.
+
+You do not certify the result. After you close this bead the ORCHESTRATOR runs
+`checks/livetest-observe.sh`, which performs the registered recipe's read
+itself, persists the attempt before sending it and the result after receipt, and
+decides the verdict. Agent text cannot mark an assertion passed.
+
+**Do not make the request yourself, and never retry one.** The manifest budgets
+at most two reads for the entire run — preflight's and the observation's. A
+third read is a new run, not an invisible retry; if you believe the run needs
+another, close the bead and say so. That is why this step has a single attempt:
+re-issuing it cannot buy extra reads.
+
+Record what you were told, verbatim, including any refusal. An `unauthorized`
+error is a correct outcome that tells you the boundary held.
+"""
+metadata = { "gc.scope_ref" = "body", "gc.scope_role" = "member", "gc.on_fail" = "abort_scope", "gc.continuation_group" = "livetest", "gc.session_affinity" = "require", "gc.run_target" = "{{tester_target}}" }
+
+[steps.check]
+max_attempts = 1
+
+[steps.check.check]
+mode = "exec"
+path = "../assets/scripts/checks/livetest-observe.sh"
+timeout = "30m"
+
+[[steps]]
+id = "exercise"
+title = "Exercise {{live_target}} beyond reading"
+needs = ["observe"]
+condition = "{{mutate}} == true"
+description = """
+Authorized: production state changes. This step exists only because the packet
+was admitted at `mutate` or above — at `observe` it is absent from the compiled
+graph, not forbidden in prose.
+
+Do exactly what the admitted manifest registers and nothing else. spend =
+{{spend}}: when that reads `false`, nothing you do here may arm money-bearing
+platform action, and no credential you hold permits one. When it reads `true`,
+the AMOUNT is bounded by the production fence preflight resolved — never by your
+token, which bounds only what can be armed.
+
+Report; do not repair. Finding something wrong is a *successful* live test:
+record it, file it as an ordinary backlog item, and stop. Do not diagnose beyond
+what the observation supports, do not fix it, and do not re-run an exercise
+after changing a production input — that is a second experiment wearing the
+first one's preflight.
+
+Anything you create that `settle` does not know about must be said on the work
+bead before you close this step. That is the one thing settle cannot discover.
+"""
+metadata = { "gc.scope_ref" = "body", "gc.scope_role" = "member", "gc.on_fail" = "abort_scope", "gc.continuation_group" = "livetest", "gc.session_affinity" = "require", "gc.run_target" = "{{tester_target}}" }
+
+[[steps]]
+id = "evidence"
+title = "Write the evidence record for packet {{packet_id}}"
+# `observe` is named beside `exercise` on purpose: a step whose condition is
+# false is dropped from the graph together with every `needs` that names it, so
+# a step that needed only the optional exercise would otherwise start at once.
+needs = ["observe", "exercise"]
+description = """
+The only writes this packet makes to the repository: a raw evidence document and
+a work note, in `{{work_dir}}`, under `docs/`. A live-test packet that edits code
+has left its type — that is an implementation packet, and it must be filed as
+one rather than performed inline.
+
+Every asserted fact comes from the run's own manifest, attempt receipts and
+checked verdicts, not from your prose. Report the outcome as one of `pass`,
+`feature_failure`, `refused`, `inconclusive` or `cleanup_required`. A deliberate
+negative test can satisfy its own assertion but never certifies the parent
+feature. Never copy a token, a raw payload or an unbounded reason string into
+evidence.
+
+Stage by path and commit. Do not push, do not open a pull request, and do not
+complete any backlog item: a live test is closed by its evidence, and publishing
+it is a separate step the orchestrator owns.
+"""
+metadata = { "gc.scope_ref" = "body", "gc.scope_role" = "member", "gc.on_fail" = "abort_scope", "gc.continuation_group" = "livetest", "gc.session_affinity" = "require", "gc.run_target" = "{{tester_target}}" }
+
+[[steps]]
+id = "settle"
+title = "Settle {{live_target}} back to the state preflight found"
+needs = ["body"]
+description = """
+Teardown. This step is `gc.kind = "cleanup"` and NOT a scope member, which is
+the load-bearing part of ADR-0151 clause 4: when a scoped member fails the
+orchestrator skips the remaining members, and settle must run precisely then.
+A settle demoted to a member is worse than no settle at all, because it would be
+skipped in exactly the case it exists for.
+
+The orchestrator runs `{{settle_command}}` through `checks/livetest-settle.sh`:
+holds settled, controllers disabled, canaries retired, cycles cancelled. At
+`observe` it records a verified no-op — the registered read-only recipe cannot
+create a production resource — and it still runs after a failed preflight, a
+failed observation and a restart.
+
+Do not clean up by hand, do not disable a controller you did not enable, and do
+not assume a failure means nothing needs settling. If the run created something
+the script does not know about, say so on the work bead.
+"""
+metadata = { "gc.kind" = "cleanup", "gc.scope_ref" = "body", "gc.scope_role" = "teardown" }
+
+[steps.check]
+max_attempts = 1
+
+[steps.check.check]
+mode = "exec"
+path = "../assets/scripts/checks/livetest-settle.sh"
+timeout = "30m"
+
+[[steps]]
+id = "report"
+title = "Record what packet {{packet_id}} observed on the work bead"
+needs = ["settle"]
+description = """
+A teardown as well, for the same reason as `settle`: a run that stopped at
+load-context, preflight or observe still has to reach a report, and a scope
+member would have been skipped. Its evidence is then minimal — what refused, and
+why — but it exists.
+
+Record on the work bead (find it with `gc convoy status {{convoy_id}} --json`):
+the exercise level this packet ran at, the run id and manifest digest, what you
+observed, the exact commands you ran, every refusal verbatim, what you did NOT
+do and why, and anything that needs a follow-up item.
+
+```bash
+gc bd update <work-bead-id> \\
+  --set-metadata proof.live_target={{live_target}} \\
+  --set-metadata proof.exercise_mutate={{mutate}} \\
+  --set-metadata proof.exercise_spend={{spend}} \\
+  --set-metadata gc.work_outcome=<shipped|no-op|blocked>
+```
+
+Then close the WORK bead with a one-line reason — the orchestrator's finalize
+step closes the workflow, not the work bead, and an open work bead reads as a
+packet still in flight.
+
+Do NOT mark the backlog item done: a live test is completed by published,
+settled evidence through the orchestrator's own path, never by the tester's
+say-so. You cannot commit code and you cannot push.
+"""
+metadata = { "gc.kind" = "cleanup", "gc.scope_ref" = "body", "gc.scope_role" = "teardown", "gc.continuation_group" = "livetest", "gc.run_target" = "{{tester_target}}" }
