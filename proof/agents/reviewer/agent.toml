@@ -1,0 +1,28 @@
+description = "PROOF packet reviewer: independent read-only verdict on one packet's diff, recorded as bead metadata."
+scope = "rig"
+provider = "claude"
+
+# No `prompt_template` key — see agents/worker/agent.toml for why.
+
+wake_mode = "fresh"
+max_active_sessions = 1
+min_active_sessions = 0
+idle_timeout = "1h"
+
+# Owner, 2026-10-07: use Opus 5.5 for independent packet review. Workers and
+# the other roles use Codex GPT-6.1 Sol high. The city declares the exact Claude model id.
+option_defaults = { model = "opus-5-5", effort = "high" }
+
+pre_start = [
+  "{{.CityRoot}}/packs/proof/assets/scripts/prestart-guard.sh \"{{.RigRoot}}\" \"{{.CityRoot}}\"",
+]
+
+# No Claude Code auto-memory. A rig's sessions all start in the rig root, so they
+# share one memory directory, and Claude Code loads its index into every session
+# that starts there. Workers had begun keeping per-packet "in-flight plan" files
+# in it: five packets' plans were being read by every later worker in the rig
+# (2026-09-20). A packet's plan belongs on its bead, where the next step of THAT
+# packet finds it; what the rig should know belongs in the repository's own
+# knowledge, which rig_context.py hands every worker.
+[env]
+CLAUDE_CODE_DISABLE_AUTO_MEMORY = "1"

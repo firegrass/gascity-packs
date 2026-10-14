@@ -1,0 +1,212 @@
+description = """
+Repair released stopped packets or shape named owner requests. The trigger
+assigns at most three existing items; queue depth never starts a run. The
+orchestrator enforces assigned_items when landing. Do not sling by hand.
+"""
+formula = "mol-proof-plan"
+
+[requires]
+formula_compiler = ">=2.0.0"
+
+[vars]
+
+[vars.target_rig]
+description = "Rig whose stops or owner requests are assigned. Identity only; never interpolated into a shell."
+required = true
+pattern = "^[A-Za-z0-9._-]+$"
+
+[vars.repo]
+description = "Repository whose items this run plans — the one a planned item's write_scope must name."
+required = true
+pattern = "^[A-Za-z0-9._-]+$"
+
+[vars.work_dir]
+description = "Absolute path of the planner's worktree, in the clone that holds the backlog. Created by plan_trigger.py at the workspace's standard location."
+required = true
+pattern = "^/[A-Za-z0-9._/-]+$"
+
+[vars.branch]
+description = "Planner branch checked out in that worktree. One per target rig, reused across runs."
+required = true
+pattern = "^agent/[A-Za-z0-9._-]+$"
+
+[vars.base_branch]
+description = "Branch the run was cut from and will land on."
+default = "main"
+
+[vars.assigned_items]
+description = "Exact existing BKLG ids this run may edit, supplied by the trigger and enforced at landing."
+required = true
+pattern = "^BKLG-[0-9]{8}-[a-z0-9]{4}(,BKLG-[0-9]{8}-[a-z0-9]{4}){0,2}$"
+
+[vars.land_plan]
+description = "Positive authorization to land a planning run's output on base_branch. Off by default, exactly as every outward action in this pack is: a run slung without it plans and lands nothing."
+default = "false"
+enum = ["true", "false"]
+
+[vars.gate_command]
+description = "Repository-owned validation command the ORCHESTRATOR runs in the worktree. Set per rig in city.toml [rigs.formula_vars]; never supplied from a bead."
+default = ""
+
+[vars.gate_path]
+description = "Directories prepended to PATH for the gate command only. Set per rig in city.toml [rigs.formula_vars]."
+default = ""
+pattern = "^(/[A-Za-z0-9._/-]+(:/[A-Za-z0-9._/-]+)*)?$"
+
+[vars.gate_home]
+description = "HOME for the gate command only, when its toolchain resolves state from the operator's home. Set per rig in city.toml [rigs.formula_vars]."
+default = ""
+pattern = "^(/[A-Za-z0-9._/-]+)?$"
+
+[vars.shared_checkout]
+description = "A checkout other sessions read, fast-forwarded (never more) after a landing. Set per rig in city.toml [rigs.formula_vars]; empty disables it."
+default = ""
+pattern = "^(/[A-Za-z0-9._/-]+)?$"
+
+[[steps]]
+id = "plan"
+title = "Repair or shape assigned items for {{target_rig}}"
+description = """
+Bounded planning for {{target_rig}}: Assigned items: `{{assigned_items}}`.
+Repository: `{{repo}}`. Work only in `{{work_dir}}` on `{{branch}}`.
+Read the work bead with `gc convoy status {{convoy_id}} --json`; it records the
+assignment kind and the stopped workflow ids whose evidence you must read.
+
+Read `AGENTS.md`, `docs/README.md`, and the assigned items and their `reads`.
+Read conditional doctrine and owner code only as needed for those assignments.
+
+For EACH assigned item: repair a mechanical packet defect within its existing
+agreed outcome; shape a named request whose decisions are already made; attach
+an owner question if a decision or substantial decomposition is required; or
+mark already-done work complete with repository evidence. Never invent a new
+backlog item. Never scan or groom the surrounding queue. A full or empty queue
+does not expand or cancel the assignments.
+
+Never edit an item that is claimed or `working`. If it became held after this
+run started, leave it alone and report that fact. Questions must be linked by
+`depends_on` from an assigned item. Do not edit epics, milestones, decisions,
+doctrine, scripts or product code; generated blocks are refreshed by the tool.
+
+For items made executable, run `python3 gascity/shape_check.py <id>` and resolve
+BLOCK findings within the agreed task. An item that must wait for the owner is
+an honest blocked outcome, not a reason to weaken acceptance or force admission.
+Stage changed records by path, run
+`python3 scripts/validate_docs.py --refresh-epic-views`, stage exactly the
+reported generated views, then `python3 scripts/validate_docs.py` and commit.
+Leave the worktree clean. With no edits, record no-op and the reason.
+"""
+metadata = { "gc.scope_ref" = "body", "gc.scope_role" = "member", "gc.on_fail" = "abort_scope", "gc.continuation_group" = "plan", "gc.session_affinity" = "require" }
+
+[steps.retry]
+max_attempts = 2
+on_exhausted = "hard_fail"
+
+[[steps]]
+id = "body"
+title = "Planning run scope"
+needs = ["plan", "land", "report"]
+description = """
+Terminal latch for the run. Members fail fast: when one fails, the orchestrator
+skips the rest and closes this bead with the failure, so a refused landing can
+never be followed by a report that claims the queue was refilled.
+"""
+metadata = { "gc.kind" = "scope", "gc.scope_name" = "plan", "gc.scope_role" = "body" }
+
+[[steps]]
+id = "land"
+title = "Prepare the landing on {{base_branch}}"
+needs = ["plan"]
+condition = "{{land_plan}} == true"
+description = """
+Authorized: land this run's output on `{{base_branch}}`. You prepare the commit.
+You do NOT push it: after you close this step the ORCHESTRATOR checks it and
+pushes it itself. Never run `git push`, and never rebase, amend or reset.
+
+The commits already on `{{branch}}` ahead of `origin/{{base_branch}}` are this
+run's `plan` output. You start this step in a fresh conversation and will not
+remember making them; they are still yours to land, and are not "commits you
+did not make". The run began from a clean worktree level with
+`origin/{{base_branch}}`, so nothing else can be there.
+
+Everything here is idempotent; if this bead is a re-issued iteration the landing
+was refused — read why first, then redo only what it names:
+
+```bash
+( cd "$GC_RIG_ROOT" && GC_BEAD_ID=<this bead's id> \
+    "$GC_CITY"/packs/proof/assets/scripts/checks/land-plan.sh --verify )
+```
+
+1. **Integrate**: `git fetch origin`, then `git merge --no-commit
+   origin/{{base_branch}}` if it has moved. If a merge of it is already in
+   progress, an earlier attempt of this step began it: carry on from step 2. A conflict in a generated view is
+   expected — take either side, step 2 rewrites it. A conflict in an item or a
+   question means someone changed what you changed: close this bead as a HARD
+   failure with `gc.failure_reason=integration_conflict`. Do not resolve it.
+2. **Regenerate and validate**, with your records staged:
+   `python3 scripts/validate_docs.py --refresh-epic-views`, `git add` exactly the
+   files it says it refreshed, then `python3 scripts/validate_docs.py`.
+3. **Commit** by path, or conclude the merge with `git commit`, naming every
+   assigned `BKLG-…` id in the message body like any other commit. The worktree
+   must end clean. (This step once said `git merge --no-edit`, whose generated
+   message names no packet; a Codex planner read that as a conflict with the
+   rig's commit rule and failed the landing hard, 2026-09-27.)
+
+The orchestrator lands the commit only if it contains `origin/{{base_branch}}`,
+changes nothing but the assigned existing backlog items nobody is holding,
+questions linked from them and generated views, and passes the rig's gate on its final tree. If
+`{{base_branch}}` moves again before the push, this step comes back: do it
+again. If this run wrote nothing at all, close the step — a landing of nothing
+passes.
+"""
+metadata = { "gc.scope_ref" = "body", "gc.scope_role" = "member", "gc.on_fail" = "abort_scope", "gc.continuation_group" = "plan", "gc.session_affinity" = "require" }
+
+[steps.check]
+max_attempts = 4
+
+[steps.check.check]
+mode = "exec"
+path = "../assets/scripts/checks/land-plan.sh"
+timeout = "30m"
+
+[[steps]]
+id = "report"
+title = "Record what this run planned"
+needs = ["plan", "land"]
+description = """
+Record on the work bead (find it with `gc convoy status {{convoy_id}} --json`)
+what a person needs in order to trust the queue you just changed:
+
+```bash
+cd {{work_dir}}
+gc bd update <work-bead-id> \
+  --set-metadata proof.branch={{branch}} \
+  --set-metadata proof.commit="$(git rev-parse HEAD)" \
+  --set-metadata gc.work_outcome=shipped \
+  --set-metadata gc.work_commit="$(git rev-parse HEAD)"
+```
+
+Append a note, short and specific:
+
+- every stopped packet you triaged, with its outcome and why;
+- every item you shaped, with what was wrong with it;
+- every question you filed, and the item it now blocks;
+- every assigned item you left alone, and what it is waiting for;
+- any `shape_check.py` WARN you accepted, and why;
+- anything you found that a person should decide.
+
+Then close the WORK bead — the orchestrator's finalize step closes the workflow,
+not the work bead, and an open work bead reads as a planning run still in
+flight:
+
+```bash
+gc bd close <work-bead-id> --reason "assigned items for {{target_rig}}: <n> shaped, <n> repaired, <n> owner waits"
+```
+
+If the run landed nothing, say that and why; `gc.work_outcome=no-op` is the
+honest record.
+"""
+metadata = { "gc.scope_ref" = "body", "gc.scope_role" = "member", "gc.on_fail" = "abort_scope", "gc.continuation_group" = "plan", "gc.session_affinity" = "require" }
+
+[steps.retry]
+max_attempts = 2
+on_exhausted = "hard_fail"

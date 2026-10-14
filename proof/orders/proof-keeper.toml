@@ -1,0 +1,14 @@
+# Watches admitted packets and tells a human when one needs them. It runs on the
+# orchestrator as a script: no agent, no model, no tokens. Anything that can be
+# an exec order should be one.
+#
+# It notifies; it never claims, renews, releases or completes a backlog item.
+# Those stay on the workspace's existing path, with a person or a session that
+# follows AGENTS.md making the change.
+[order]
+description = "Notify a human when an admitted packet finishes, fails, or its backlog claim is about to expire"
+trigger = "cooldown"
+interval = "10m"
+scope = "city"
+timeout = "120s"
+exec = "$PACK_DIR/assets/scripts/keeper.py"

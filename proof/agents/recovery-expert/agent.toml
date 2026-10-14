@@ -1,0 +1,9 @@
+description = "Bounded diagnosis of a stalled packet; actions belong to trusted recovery scripts."
+scope = "rig"
+provider = "codex"
+wake_mode = "fresh"
+option_defaults = { model = "gpt-6-astra", effort = "high" }
+max_active_sessions = 1
+min_active_sessions = 0
+idle_timeout = "30m"
+pre_start = ["{{.CityRoot}}/packs/proof/assets/scripts/prestart-guard.sh \"{{.RigRoot}}\" \"{{.CityRoot}}\""]

@@ -1,0 +1,140 @@
+{
+  "action": "import",
+  "records": [
+    {
+      "schema": "proof.work.v1",
+      "id": "test",
+      "path": "docs/backlog/milestones/test.md",
+      "fields": {
+        "owner": "unassigned",
+        "created": "2026-01-01",
+        "last_reviewed": "2026-01-02",
+        "source_documents": [],
+        "confidence": "high",
+        "related_repos": [],
+        "doc_type": "milestone",
+        "title": "Synthetic milestone",
+        "status": "open",
+        "milestone_id": "test",
+        "sequence": "0",
+        "outcome": "Synthetic outcome",
+        "lanes": [
+          "delivery"
+        ]
+      },
+      "body": "\n## Acceptance\n\nKeep the synthetic promise.\n",
+      "authored_revision": 1,
+      "operational_revision": 0,
+      "source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "source_text": "Synthetic original test",
+      "semantic_digest": "9afb61686c55b2187341338f0956299a6c3a245303cc509ce927cc0628b7252c"
+    },
+    {
+      "schema": "proof.work.v1",
+      "id": "EPIC-20260101-aaaa",
+      "path": "docs/backlog/epics/EPIC-20260101-aaaa-test.md",
+      "fields": {
+        "owner": "unassigned",
+        "created": "2026-01-01",
+        "last_reviewed": "2026-01-02",
+        "source_documents": [],
+        "confidence": "high",
+        "related_repos": [],
+        "doc_type": "epic",
+        "title": "Synthetic epic",
+        "status": "open",
+        "epic_id": "EPIC-20260101-aaaa",
+        "outcome": "Synthetic outcome",
+        "milestone": "test",
+        "lane": "delivery",
+        "gate": "false",
+        "priority": "p0",
+        "rank": "0",
+        "depends_on": []
+      },
+      "body": "\n## Acceptance\n\nKeep the synthetic promise.\n",
+      "authored_revision": 1,
+      "operational_revision": 0,
+      "source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "source_text": "Synthetic original EPIC-20260101-aaaa",
+      "semantic_digest": "f1b36f2842aab01ca113b77fc289c217f98c16ed1da6b4e1a703fb92f76ca69a"
+    },
+    {
+      "schema": "proof.work.v1",
+      "id": "BKLG-20260101-bbbb",
+      "path": "docs/backlog/items/BKLG-20260101-bbbb-test.md",
+      "fields": {
+        "owner": "unassigned",
+        "created": "2026-01-01",
+        "last_reviewed": "2026-01-02",
+        "source_documents": [],
+        "confidence": "high",
+        "related_repos": [],
+        "doc_type": "backlog",
+        "title": "Synthetic item",
+        "status": "open",
+        "parent_epic": "EPIC-20260101-aaaa",
+        "milestone": "test",
+        "lane": "delivery",
+        "gate": "false",
+        "priority": "p0",
+        "rank": "0",
+        "depends_on": [],
+        "write_scope": [
+          "synthetic:src/shared.py"
+        ],
+        "validation": [
+          "python3 test.py"
+        ],
+        "evidence": [],
+        "extra_legacy": ""
+      },
+      "body": "\n## Acceptance\n\nKeep the synthetic promise.\n",
+      "authored_revision": 1,
+      "operational_revision": 0,
+      "source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "source_text": "Synthetic original BKLG-20260101-bbbb",
+      "semantic_digest": "3c85f049c9193ef3ccd887d33982c5b745600771c0cb74eefe9aebb0160bfdfd"
+    },
+    {
+      "schema": "proof.work.v1",
+      "id": "BKLG-20260101-cccc",
+      "path": "docs/backlog/items/BKLG-20260101-cccc-test.md",
+      "fields": {
+        "owner": "unassigned",
+        "created": "2026-01-01",
+        "last_reviewed": "2026-01-02",
+        "source_documents": [],
+        "confidence": "high",
+        "related_repos": [],
+        "doc_type": "backlog",
+        "title": "Synthetic item",
+        "status": "open",
+        "parent_epic": "EPIC-20260101-aaaa",
+        "milestone": "test",
+        "lane": "delivery",
+        "gate": "false",
+        "priority": "p0",
+        "rank": "0",
+        "depends_on": [],
+        "write_scope": [
+          "synthetic:src/shared.py"
+        ],
+        "validation": [
+          "python3 test.py"
+        ],
+        "evidence": [],
+        "extra_legacy": ""
+      },
+      "body": "\n## Acceptance\n\nKeep the synthetic promise.\n",
+      "authored_revision": 1,
+      "operational_revision": 0,
+      "source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "source_text": "Synthetic original BKLG-20260101-cccc",
+      "semantic_digest": "3c85f049c9193ef3ccd887d33982c5b745600771c0cb74eefe9aebb0160bfdfd"
+    }
+  ],
+  "epoch": "test",
+  "source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "operation_id": "checked-import"
+}

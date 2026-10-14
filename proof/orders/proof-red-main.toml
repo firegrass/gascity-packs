@@ -1,0 +1,24 @@
+# Answers a red `main`: one Opus 5.5 xhigh session recommends the way forward, and a
+# person takes it. The order is a script; the model is spent only on the
+# decision, never on watching.
+#
+# `main` being green is the common case and costs two API calls a pass. Nothing
+# happens until the operator's `<city>/proof/policy.toml` says so:
+#
+#     [red_main]
+#     enabled = false      # the whole order
+#     max_attempts = 2     # sessions spent on one red before it is a person's
+#     revert_pr = []       # rigs where it may OPEN (never merge) a revert PR
+#     rerun = []           # rigs where it may re-run a standing scheduled red
+#
+# Interval: ten minutes. A red main is urgent for a person, not for a script —
+# the completer is already watching for a later green head that settles it on
+# its own, and answering twice as fast would mostly mean answering a red that
+# the next push fixes.
+[order]
+description = "When main is red, establish who owns it and get one recommendation — revert, fix forward, re-run or a person"
+trigger = "cooldown"
+interval = "10m"
+scope = "city"
+timeout = "20m"
+exec = "$PACK_DIR/assets/scripts/red_main.py"

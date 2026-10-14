@@ -1,0 +1,11 @@
+# The factory's heartbeat: the completer, then the dispatcher. A script on the
+# orchestrator — no agent, no model, no tokens. What it may do is the operator's
+# `<city>/proof/policy.toml`; with no policy, or `enabled = false`, the dispatcher
+# does nothing and the completer still closes out packets that already ran.
+[order]
+description = "Complete merged packets, then claim and admit ready backlog items up to each rig's work-in-progress limit"
+trigger = "cooldown"
+interval = "5m"
+scope = "city"
+timeout = "20m"
+exec = "$PACK_DIR/assets/scripts/factory.sh"

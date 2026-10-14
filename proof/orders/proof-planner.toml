@@ -1,0 +1,9 @@
+# The timer only looks for released stops or explicit owner assignments.
+# Empty queues never start a model. Dispatch has its own five-minute order.
+[order]
+description = "Repair newly stopped packets or shape named owner requests, at most three items per run"
+trigger = "cooldown"
+interval = "15m"
+scope = "city"
+timeout = "10m"
+exec = "$PACK_DIR/assets/scripts/plan_trigger.py"

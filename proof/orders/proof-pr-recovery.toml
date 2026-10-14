@@ -1,0 +1,8 @@
+# Script observation only; models run only inside a claimed recovery formula.
+[order]
+description = "Recover conflicting PRs with one bounded owner and fresh validation"
+trigger = "cooldown"
+interval = "5m"
+scope = "city"
+timeout = "20m"
+exec = "$PACK_DIR/assets/scripts/pr_recovery.py observe"

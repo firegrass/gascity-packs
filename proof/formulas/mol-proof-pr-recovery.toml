@@ -1,0 +1,160 @@
+description = "Recover one existing conflicting PR with fresh gates and independent review."
+formula = "mol-proof-pr-recovery"
+extends = ["mol-proof-packet"]
+
+[requires]
+formula_compiler = ">=2.0.0"
+
+[vars.pr_recovery_key]
+required = true
+pattern = "^[a-z0-9][a-z0-9-]*-[0-9]+$"
+description = "Durable recovery record owned by the PR controller."
+
+[vars.pr_recovery_token]
+required = true
+pattern = "^[a-f0-9]{20}$"
+description = "One bounded recovery attempt; base advances cannot reset its incident budget."
+
+[[steps]]
+id = "load-context"
+title = "Read the existing packet and recovery assignment"
+description = """
+Read the input work bead through `gc convoy status {{convoy_id}} --json`.
+It names the original packet, its reviewed commit and the isolated recovery
+worktree. Read the repository AGENTS.md, required doctrine and original packet.
+This workflow owns recovery of an existing PR, with unchanged acceptance.
+Its new worktree at {{work_dir}} is the only writable source workspace.
+"""
+metadata = { "gc.scope_ref" = "body", "gc.scope_role" = "member", "gc.on_fail" = "abort_scope", "gc.continuation_group" = "main", "gc.session_affinity" = "require" }
+[steps.retry]
+max_attempts = 1
+on_exhausted = "hard_fail"
+
+[[steps]]
+id = "workspace"
+title = "Verify ownership and integrate the observed base"
+needs = ["load-context"]
+description = """
+The controller created {{work_dir}} on {{branch}} at {{prior_commit}}.
+Run the trusted recovery helper, which rechecks policy, packet claim and PR
+identity before integrating main. It records the base before starting the merge:
+
+```bash
+python3 "$GC_CITY/packs/proof/assets/scripts/pr_recovery.py" prepare {{pr_recovery_key}}
+```
+
+An unfinished merge left by this helper belongs to THIS recovery attempt. Its
+conflicts are passed to the code step; they are not foreign dirty work.
+If the helper refuses ownership, stop with that exact reason.
+"""
+metadata = { "gc.scope_ref" = "body", "gc.scope_role" = "setup", "gc.on_fail" = "abort_scope", "gc.continuation_group" = "main", "gc.session_affinity" = "require" }
+[steps.retry]
+max_attempts = 1
+on_exhausted = "hard_fail"
+
+[[steps]]
+id = "implement"
+title = "Implement packet {{packet_id}} until its gate passes"
+needs = ["workspace"]
+description = """
+Implementation loop. Each iteration is the worker's change (`code`), then, when
+the rig runs its gate as a separate step, the gate on the committed tree
+(`gate`). The orchestrator's check closes the loop only when the gate has passed
+on the exact tree at HEAD; otherwise it starts the next iteration.
+"""
+metadata = { "gc.scope_ref" = "body", "gc.scope_role" = "member", "gc.on_fail" = "abort_scope" }
+
+[steps.check]
+max_attempts = 2
+
+[steps.check.check]
+mode = "exec"
+path = "../assets/scripts/checks/packet-gates.sh"
+# 90 min (owner, 2026-10-07): a large liskov-rs diff gated in 63 min. With the
+# gate lane on, the check only reads the gate step's record and takes seconds;
+# the timeout bounds legacy workflows without the gate lane.
+timeout = "90m"
+
+[[steps.children]]
+id = "code"
+title = "Implement packet {{packet_id}}"
+description = """
+Recover the existing PR in {{work_dir}} on {{branch}}. Read the recovery input
+bead and original packet; its acceptance and doctrine remain binding. The
+controller created this isolated worktree at prior_commit={{prior_commit}}.
+The workspace step may have left a merge in progress: those staged/conflicting
+files are THIS recovery's work. Preserve them, never reset or stash them.
+
+Run the trusted integration helper (repeat-safe on this attempt):
+
+```bash
+python3 "$GC_CITY/packs/proof/assets/scripts/pr_recovery.py" integrate {{pr_recovery_key}}
+```
+
+It integrates the recorded base and regenerates the known policy-client bundle
+through its repository-owned generator. It never chooses a source conflict's
+meaning. Resolve remaining source conflicts within the packet's outcome,
+preserving main's changes. Escalate ambiguous contracts or ownership. Commit
+the merge and any focused fixes by path. Never force-push or change main.
+
+Run the repository's selected local checks on the final integrated tree. The
+existing gater and independent reviewer follow this step. If a gate fails,
+repair it in this worktree and preserve history. Changes outside the packet's
+scope remain subject to the existing doctrine and scope gate. Do not redo the
+original implementation or poll CI. Close with gc.work_outcome=shipped,
+gc.work_commit=HEAD and gc.work_branch={{branch}} in the same update.
+"""
+metadata = { "gc.continuation_group" = "main" }
+
+[[steps.children]]
+id = "gate"
+title = "Gate packet {{packet_id}} on its committed tree"
+needs = ["code"]
+condition = "{{gate_lane}} == true"
+description = """
+Run by the zero-token gater (`assets/scripts/gater.sh`), never by a model. It
+runs the rig's gate in `{{work_dir}}` on the committed tree, records
+`proof.gate_tree`, `proof.gate_result` and the log tail on this bead, and
+closes it `gc.outcome=pass` whatever the gate said: the implement check reads
+the record and decides.
+"""
+metadata = { "gc.run_target" = "{{gate_target}}" }
+
+[[steps]]
+id = "push"
+title = "Publish the reviewed recovery to the existing PR branch"
+needs = ["implement", "review-cycle"]
+condition = "{{push}} == true"
+description = """
+Publish only through the trusted helper. It verifies the live packet claim,
+policy, exact-tree gate and independent approval, original head/base ancestry,
+and the current remote head; it uses an ordinary fast-forward push to the
+original PR branch, never a force push. It reconciles a lost push response.
+
+```bash
+python3 "$GC_CITY/packs/proof/assets/scripts/pr_recovery.py" publish {{pr_recovery_key}}
+```
+
+Do not use the recovery workspace branch to open a new PR. Do not push directly,
+merge main, or poll CI. The completer owns observation after publication.
+"""
+metadata = { "gc.scope_ref" = "body", "gc.scope_role" = "member", "gc.on_fail" = "abort_scope", "gc.continuation_group" = "publish" }
+[steps.retry]
+max_attempts = 2
+on_exhausted = "hard_fail"
+
+[[steps]]
+id = "report"
+title = "Close the recovery input with its publication receipt"
+needs = ["implement", "review-cycle", "push"]
+description = """
+Read the controller's record using pr_recovery.py status. Record its published
+SHA and the validation/review outcome on THIS workflow's input work bead, then
+close that input. Do not edit or close the original packet: it stays awaiting
+merge, and the completer will finish it after the merge and main verification.
+No polling. A failed recovery leaves the claim held and its escalation visible.
+"""
+metadata = { "gc.scope_ref" = "body", "gc.scope_role" = "member", "gc.on_fail" = "abort_scope", "gc.continuation_group" = "publish" }
+[steps.retry]
+max_attempts = 1
+on_exhausted = "hard_fail"

@@ -1,0 +1,59 @@
+description = "PROOF packet worker: executes the ready beads of one admitted packet, inside that packet's worktree."
+scope = "rig"
+provider = "grok"
+
+# NOTE: no `prompt_template` key. `prompt.template.md` beside this file is
+# discovered by convention. An explicit relative path resolves against the PACK
+# ROOT, and a path that does not exist makes Gas City start the agent with NO
+# prompt at all, silently — which is how the first pilot worker ended up with no
+# task and adopted another session's packet. Verify any change with
+#   gc prime <rig>/proof.worker
+
+# One conversation per packet. "fresh" restarts the provider conversation on
+# every wake, and a session wakes once per bead: the first measured packet ran
+# as NINE separate conversations, each re-reading the prompt and the repository's
+# rules, and the context `load-context` built was discarded before `implement`
+# began. "resume" keeps a packet's steps in one conversation. Packets CAN share a
+# conversation: a session drains only when no work is queued for the pool, and the
+# first dispatched batch had one session decline a packet and take the next in
+# the same conversation. tokens.py attributes usage per message for that reason.
+wake_mode = "resume"
+
+# Owner, 2026-10-14: implementation workers use Grok 4.7 at high effort.
+# The city declares the exact Grok model choice. Pin it so an account
+# default cannot change packet behavior. Verify a pin from a running session's
+# `ps` arguments, never from this file.
+# "high" is the ceiling: the shipped default, "max", spent 90k output tokens on
+# a 7k-token document on the first measured packet. Raise it per packet, not by
+# default.
+option_defaults = { model = "grok-4.7", effort = "high" }
+
+# Three workers per rig. Each packet has its own worktree, branch and target
+# directory, and the dispatcher never has two packets with overlapping write
+# scopes in flight (the backlog claim refuses the second), so workers do not
+# meet. The rig-level cap must leave room for the control-dispatcher and the
+# reviewer as well: 5 = dispatcher + three workers + one reviewer.
+max_active_sessions = 3
+min_active_sessions = 0
+idle_timeout = "2h"
+
+default_sling_formula = "mol-proof-packet"
+
+# Refuse to create a session unless the rig root is a clean, Gas City-owned
+# clone. Gas City starts a rig-scoped agent in the rig root and assumes it owns
+# that checkout. In this workspace the ordinary checkouts are shared and usually
+# dirty with other sessions' in-flight work, so a rig must point at a dedicated
+# clone, and this guard makes that a precondition rather than a convention.
+pre_start = [
+  "{{.CityRoot}}/packs/proof/assets/scripts/prestart-guard.sh \"{{.RigRoot}}\" \"{{.CityRoot}}\"",
+]
+
+# No Claude Code auto-memory. A rig's sessions all start in the rig root, so they
+# share one memory directory, and Claude Code loads its index into every session
+# that starts there. Workers had begun keeping per-packet "in-flight plan" files
+# in it: five packets' plans were being read by every later worker in the rig
+# (2026-09-20). A packet's plan belongs on its bead, where the next step of THAT
+# packet finds it; what the rig should know belongs in the repository's own
+# knowledge, which rig_context.py hands every worker.
+[env]
+CLAUDE_CODE_DISABLE_AUTO_MEMORY = "1"

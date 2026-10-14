@@ -1,0 +1,23 @@
+# Answers a packet's red pull request: one short session classifies the failure,
+# and the NEXT pass acts on that verdict under the rig's authorization. The
+# order itself is a script — the model is spent only on the question, never on
+# watching, fetching or waiting.
+#
+# It does nothing at all until the operator's `<city>/proof/policy.toml` says so:
+#
+#     [ci_triage]
+#     enabled = false      # the whole order
+#     max_attempts = 2     # sessions spent on one packet before it is a person's
+#     rerun = []           # rigs whose failed jobs it may re-run
+#     resume = []          # rigs whose packets it may reopen and re-admit
+#
+# Interval: five minutes matches the factory pass it shares a lock with. A red
+# does not become urgent faster than that, and the judging pass and the acting
+# pass are deliberately different passes.
+[order]
+description = "Classify a packet's red pull request, then re-run, resume or escalate it under the rig's authorization"
+trigger = "cooldown"
+interval = "5m"
+scope = "city"
+timeout = "20m"
+exec = "$PACK_DIR/assets/scripts/ci_triage.py"

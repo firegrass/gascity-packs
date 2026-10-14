@@ -1,0 +1,22 @@
+description = "PROOF gater: zero-token, runs one packet's gate on its committed tree and records the result for the implement check. No model."
+scope = "rig"
+
+# No provider and no prompt: the session IS the script. One process is one turn
+# (claim one gate bead, run it, close it, exit); the reconciler starts another
+# while gate work remains. `one_shot` tells the runtime that a clean exit is
+# completed work, not a session that died on start.
+start_command = "bash {{.CityRoot}}/packs/proof/assets/scripts/gater.sh"
+prompt_mode = "none"
+lifecycle = "one_shot"
+process_names = ["bash"]
+
+# How many gates a rig runs at once. The pack default is one; a rig with
+# gate_lane on raises it in city.toml, and its rig max_active_sessions must have
+# room for these beside the dispatcher, workers and reviewer.
+max_active_sessions = 1
+min_active_sessions = 0
+# The script is silent for the whole gate (its output goes to a log), so the
+# runtime reads a running gate as idle. At 5m every liskov-rs gate was killed
+# and re-claimed from scratch, ~26 times per gater, none finishing (2026-10-09).
+# A gate is the same work a worker runs inline, so it gets the worker's bound.
+idle_timeout = "2h"

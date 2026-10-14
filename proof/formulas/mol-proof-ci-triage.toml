@@ -1,0 +1,96 @@
+description = """
+One triage of one red pull request: classify the failure, record the verdict,
+close. Nothing else.
+
+The session is READ-ONLY by construction — the whole of its output is two
+values on its own bead — because the action belongs to the script that started
+it. `ci_triage.py` reads the verdict on its next pass and does what the rig is
+authorized to do: re-run the failed jobs, reopen the packet's work bead and
+re-admit it so its worker resumes, or mail a person. An agent that both judged
+and acted would be an agent deciding its own authorization.
+
+It is one step because it is one question, asked with the evidence already in
+the bead: `ci_failure.py` extracted the first causal failure and its log before
+the session existed. Nothing here fetches a log, walks a run, or reads the
+repository to answer.
+
+Launched by `ci_triage.py` when a packet's open pull request has a failed check
+and the policy's `[ci_triage]` table allows it. Do not sling this formula by
+hand.
+"""
+formula = "mol-proof-ci-triage"
+
+[requires]
+formula_compiler = ">=2.0.0"
+
+[vars]
+
+[vars.packet_id]
+description = "Backlog item whose pull request went red. Identity only; never interpolated into a shell."
+required = true
+pattern = "^BKLG-[0-9]{8}-[a-z0-9]{4}$"
+
+[vars.pr_url]
+description = "The pull request being triaged. Shown to the session; it is not fetched for it."
+required = true
+pattern = "^https://github[.]com/[A-Za-z0-9._/-]+$"
+
+[[steps]]
+id = "classify"
+title = "Classify the red pull request of {{packet_id}}"
+description = """
+Read your bead. It holds the first causal failure of `{{pr_url}}` and the log of
+the step that failed, extracted before this session started.
+
+```bash
+gc convoy status {{convoy_id}} --json
+gc bd show <your bead id>
+```
+
+Answer one question: **whose failure is this?** Exactly one of
+
+- `infrastructure` — the failure is not about the change. A runner died, a
+  network call to a registry or a provider failed, a timing assertion on a
+  shared runner wobbled, a cache or a lock timed out. The same commit would
+  pass on a re-run.
+- `packet` — the change caused it. Its own test fails, it broke a test it
+  touches, a lint or a guard it tripped, a contract it changed and did not
+  update everywhere, a migration it added.
+- `foreign` — real, and not this packet's: the failure is already happening on
+  `main` or on other pull requests, or it belongs to a workflow this change
+  cannot reach. Someone owns it; it is not this worker.
+- `unclear` — the evidence does not decide it. This is a legitimate answer and
+  the right one whenever the other three would be a guess. It costs a person one
+  mail; a wrong `infrastructure` costs a re-run that fails again, and a wrong
+  `packet` sends a worker to fix something it did not break.
+
+Judge the excerpt against the packet's diff, which you may read:
+
+```bash
+git -C <the packet worktree named on the work bead> diff origin/main...HEAD --stat
+```
+
+Nothing else. Do not fetch the run, do not open the repository's CI
+configuration, do not re-run anything, do not push, comment, merge or edit a
+file anywhere. You have no authorization for any outward action and the script
+that started you will not take one you were not asked for.
+
+Record the verdict and close:
+
+```bash
+gc bd update <your bead id> \
+  --set-metadata proof.ci_verdict=<infrastructure|packet|foreign|unclear> \
+  --set-metadata proof.ci_confidence=<high|medium|low>
+gc bd note <your bead id> "<the reason, in two or three sentences: what failed, what makes it that kind of failure, and what you ruled out>"
+gc bd close <your bead id> --reason "triage: <verdict>"
+```
+
+A close without `proof.ci_verdict` is read as "no verdict" and mailed to a
+person — so if you cannot answer, answer `unclear` and say why, rather than
+closing silently.
+"""
+metadata = { "gc.run_target" = "proof.triage" }
+
+[steps.retry]
+max_attempts = 2
+on_exhausted = "hard_fail"

@@ -1,0 +1,9 @@
+# Packets per day, tokens per packet, CI pass rate and reverts, mailed to a human
+# once a day. A script: no agent, no model, no tokens.
+[order]
+description = "Mail the daily PROOF factory report"
+trigger = "cooldown"
+interval = "24h"
+scope = "city"
+timeout = "10m"
+exec = "$PACK_DIR/assets/scripts/report.py"
