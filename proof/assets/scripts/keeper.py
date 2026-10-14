@@ -47,19 +47,67 @@ def gc_json(*args, default):
 
 
 def claim_expiry(backlog_clone, item_id):
-    sys.path.insert(0, os.path.join(backlog_clone, "scripts"))
+    """When the item's claim ends: from its file under Git, from the client
+    snapshot's row under Beads (ADR-0236) — never a Markdown read then."""
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import work_authority as wa
     try:
-        import docs_model as dm
-    except Exception:
+        native = wa.beads(backlog_clone)
+    except Exception as why:  # noqa: BLE001 - an unreadable marker skips the check, never guesses
+        print("keeper: %s; skipping claim-expiry checks" % why, file=sys.stderr)
         return None
-    files = glob.glob(os.path.join(backlog_clone, "docs/backlog/items", item_id + "-*.md"))
-    if len(files) != 1:
-        return None
-    fm, _body, _problems = dm.split_frontmatter(open(files[0], encoding="utf-8").read())
+    if native:
+        try:
+            row = wa.row(backlog_clone, item_id)
+        except Exception as why:  # noqa: BLE001
+            print("keeper: cannot read the work ledger: %s" % why, file=sys.stderr)
+            return None
+        fm = (row or {}).get("fields") or {}
+    else:
+        sys.path.insert(0, os.path.join(backlog_clone, "scripts"))
+        try:
+            import docs_model as dm
+        except Exception:
+            return None
+        files = glob.glob(os.path.join(backlog_clone, "docs/backlog/items", item_id + "-*.md"))
+        if len(files) != 1:
+            return None
+        fm, _body, _problems = dm.split_frontmatter(open(files[0], encoding="utf-8").read())
     if not isinstance(fm, dict) or not fm.get("claim_expires"):
         return None
     stamp = datetime.fromisoformat(str(fm["claim_expires"]).strip().replace("Z", "+00:00"))
     return stamp if stamp.tzinfo else stamp.replace(tzinfo=timezone.utc)
+
+
+def renew_lease(backlog_clone, rig, bead, pid):
+    """Under the Beads authority the keeper renews a running packet's lease
+    itself, through the client, for the policy's `claim_hours`; a refusal, or
+    a write freeze, leaves the expiring notice to go out as before. Returns
+    the renewal result, or None when nothing was renewed."""
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import factory_lib as fl
+    import work_authority as wa
+    if not wa.beads(backlog_clone) or wa.frozen(backlog_clone):
+        return None
+    seat = "gascity/" + rig
+    lease = wa.lease_of(backlog_clone, pid, seat, bead.get("metadata") or {})
+    if not lease:
+        return None
+    try:
+        hours = fl.load_policy(fl.city_dir())["claim_hours"]
+    except Exception:  # noqa: BLE001 - no policy, the default claim length
+        hours = fl.POLICY_DEFAULTS["claim_hours"]
+    try:
+        result = wa.client(backlog_clone, "renew", item=pid, by=seat, lease=lease, hours=hours)
+    except Exception as why:  # noqa: BLE001 - a refused renewal is reported, never retried blindly
+        print("keeper: could not renew %s: %s" % (pid, str(why)[-200:]), file=sys.stderr)
+        return None
+    wa.forget(backlog_clone)
+    new_lease = str((result or {}).get("lease_id") or lease)
+    if new_lease != (bead.get("metadata") or {}).get(wa.LEASE_KEY):
+        sh(["gc", "bd", "--rig", rig, "update", bead["id"], "--set-metadata", "%s=%s" % (wa.LEASE_KEY, new_lease)])
+    print("keeper: renewed the lease of %s for %s hours in the work ledger" % (pid, hours))
+    return result
 
 
 def record_tokens(rig, rig_path, bead, packet_id):
@@ -198,6 +246,8 @@ def main():
                 continue
             if backlog_clone and seen not in ("expiring", "failed"):
                 expires = claim_expiry(backlog_clone, pid)
+                if expires is not None and expires - now < EXPIRY_WARNING and renew_lease(backlog_clone, rig, b, pid):
+                    continue
                 if expires is not None and expires - now < EXPIRY_WARNING:
                     notify(rig, b, "expiring", "PROOF claim expiring: %s" % pid,
                            facts + "\n\nThe backlog claim ends at %s and the packet is still open.\n"

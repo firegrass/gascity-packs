@@ -125,6 +125,7 @@ import factory_lib as fl  # noqa: E402  the one landing routine
 import livetest_contract as lt  # noqa: E402  the one parser for the record shape
 import livetest_runner as lr  # noqa: E402  the recipe's trusted request constants
 import livetest_state as ls  # noqa: E402  the one run store
+import work_authority as wa  # noqa: E402  Git or Beads work authority (ADR-0236)
 
 EVIDENCE_KIND = "proof.liskov.livetest-evidence.v1"
 PUBLICATION_KIND = "proof.liskov.livetest-publication.v1"
@@ -638,6 +639,78 @@ def _docs_model(tree):
     return module
 
 
+def _ledger_effect(clone, evidence):
+    """`_item_effect` under the Beads authority: judged on the snapshot row,
+    never a file. "closed" means the item is ours to complete through the
+    client once the evidence has landed (`_ledger_record`)."""
+    row = wa.row(clone, evidence.item_id, fresh=True)
+    if row is None:
+        return "missing", None, None
+    rel = row.get("path")
+    if evidence.report != "pass":
+        return "left_open", rel, None
+    fm = row.get("fields") or {}
+    if fm.get("status") == "done" and any(evidence.raw_path.split("/")[-1] in str(e) for e in fm.get("evidence") or []):
+        return "closed", rel, None            # an earlier pass completed it; the receipt was lost
+    if fm.get("status") != "working" or not str(fm.get("claimed_by") or "").startswith(SEAT_PREFIX) \
+            or not row.get("lease_id"):
+        return "not_ours", rel, None
+    live = {"live_target": evidence.target, "exercise": evidence.exercise,
+            "live_recipe": evidence.recipe, "live_expected_build": evidence.expected_build}
+    if row.get("semantic_digest") != evidence.item_blob_sha or \
+            any(str(fm.get(k) or "").strip() != v for k, v in live.items()):
+        return "identity_changed", rel, None
+    return "closed", rel, None
+
+
+def _ledger_record(clone, evidence, commit, effect):
+    """After the documents landed as `commit`: record the raw evidence on the
+    item through the client, and — for a pass that is ours — complete it with
+    the landing commit as its merge and main identity. The helper's last-child
+    refusal holds the item for a person, as the Git path does; any other
+    refusal leaves it open and says why. Returns the item effect."""
+    seat_row = wa.row(clone, evidence.item_id, fresh=True)
+    if seat_row is None or effect in ("missing",):
+        return effect
+    fm = seat_row.get("fields") or {}
+    if effect == "closed" and fm.get("status") == "done":
+        return "closed"                       # completed by an earlier pass whose receipt was lost
+    actor = fm.get("claimed_by") if str(fm.get("claimed_by") or "").startswith(SEAT_PREFIX) else ""
+    if not actor:
+        return "not_ours" if effect == "closed" else effect
+    entry = _rel(evidence.raw_path, seat_row["path"])
+    if entry not in (fm.get("evidence") or []):
+        try:
+            wa.client(clone, "evidence", item=evidence.item_id, by=actor,
+                      request={"entries": [entry], "receipts": {"kind": PUBLICATION_KIND, "run_id": evidence.run_id,
+                                                               "report": evidence.report, "commit": commit,
+                                                               "evidence_digest": evidence.digest}})
+            wa.forget(clone)
+        except fl.Refused as why:
+            fl.log("completer", "live run %s: the work ledger refused the evidence entry — %s" % (evidence.run_id, why))
+    if effect != "closed" or fm.get("status") == "done":
+        return effect
+    lease = seat_row.get("lease_id") or ""
+    try:
+        wa.client(clone, "complete", item=evidence.item_id, by=actor, lease=str(lease), request={
+            "expected_semantic_digest": seat_row.get("semantic_digest"), "resolution": "done",
+            "evidence": {"merge_sha": commit, "main_sha": commit, "attempts": [{"bead_id": evidence.run_id, "rig": actor[len(SEAT_PREFIX):],
+                                                                             "outcome": evidence.report}],
+                         "acceptance": {"kind": EVIDENCE_KIND, "run_id": evidence.run_id, "report": evidence.report,
+                                        "evidence_digest": evidence.digest, "raw": evidence.raw_path}},
+            "notes": "Completed by the PROOF live-result publisher: run %s passed; evidence at %s"
+                     % (evidence.run_id, commit[:10])})
+    except fl.Refused as why:
+        wa.forget(clone)
+        if wa.is_last_child_refusal(why):
+            return "held_last_child"
+        fl.log("completer", "live run %s: the work ledger refused the completion — %s; the item stays open"
+               % (evidence.run_id, why))
+        return "left_open"
+    wa.forget(clone)
+    return "closed"
+
+
 def _item_effect(tree, evidence, dm, today):
     """(effect, item repo-relative path or None, new text or None) for this run."""
     files = glob.glob(os.path.join(tree, "docs", "backlog", "items", evidence.item_id + "-*.md"))
@@ -700,7 +773,11 @@ def _receipt(evidence, action, commit, recorded, effect):
 
 def _effect_of(clone, evidence, commit):
     """What an earlier publication commit did to the item: only a pass that
-    completed it touches the item file."""
+    completed it touches the item file. Under Beads the ledger is asked, and a
+    pass whose receipt was lost before the ledger heard is recorded now."""
+    if wa.beads(clone):
+        effect, _rel_path, _text = _ledger_effect(clone, evidence)
+        return _ledger_record(clone, evidence, commit, effect)
     touched = _git(clone, "diff-tree", "--no-commit-id", "--name-only", "-r", commit).stdout.split()
     return "closed" if any(p.startswith("docs/backlog/items/%s-" % evidence.item_id)
                            for p in touched) else "left_open"
@@ -747,7 +824,11 @@ def publish_run(city, clone, run_id, *, now=None, hook=None, shared_checkout="",
           "cutting the publish worktree")
     try:
         dm = _docs_model(tree)
-        effect, item_rel, item_text = _item_effect(tree, evidence, dm, ls.instant(now())[:10])
+        native = wa.beads(clone)
+        effect, item_rel, item_text = (_ledger_effect(clone, evidence) if native
+                                       else _item_effect(tree, evidence, dm, ls.instant(now())[:10]))
+        if native and item_rel is not None and not os.path.isfile(os.path.join(tree, item_rel)):
+            item_rel = None                   # a virtual record: nothing on disk to link to
         docs = render(evidence, item_rel)
         for path, text in docs.items():
             target = os.path.join(tree, path)
@@ -766,6 +847,8 @@ def publish_run(city, clone, run_id, *, now=None, hook=None, shared_checkout="",
         event("rendered")
         landed = land(tree, _message(evidence, effect), shared_checkout, add=sorted(docs))
         event("landed")
+        if native:
+            effect = _ledger_record(clone, evidence, landed, effect)
         return _receipt(evidence, "published", landed, _record(store, evidence, landed), effect)
     finally:
         _drop_worktree(clone, tree)

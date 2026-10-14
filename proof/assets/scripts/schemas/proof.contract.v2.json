@@ -1,0 +1,123 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "proof.contract.v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "id",
+    "packet",
+    "rig",
+    "repository",
+    "item_path",
+    "task_digest",
+    "base",
+    "docs_revision",
+    "recipe_digest",
+    "acceptance",
+    "sources",
+    "prerequisites",
+    "claim",
+    "publication",
+    "scope",
+    "validation",
+    "execution",
+    "work"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string"
+    },
+    "id": {
+      "type": "string"
+    },
+    "packet": {
+      "type": "string"
+    },
+    "rig": {
+      "type": "string"
+    },
+    "repository": {
+      "type": "string"
+    },
+    "item_path": {
+      "type": "string"
+    },
+    "task_digest": {
+      "type": "string"
+    },
+    "base": {
+      "type": "string"
+    },
+    "docs_revision": {
+      "type": "string"
+    },
+    "recipe_digest": {
+      "type": "string"
+    },
+    "acceptance": {
+      "type": "string"
+    },
+    "sources": {
+      "type": "object"
+    },
+    "prerequisites": {
+      "type": "object"
+    },
+    "claim": {
+      "type": "object"
+    },
+    "publication": {
+      "type": "object"
+    },
+    "scope": {
+      "type": "array"
+    },
+    "validation": {
+      "type": "array"
+    },
+    "execution": {
+      "type": "object"
+    },
+    "work": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "bead_id",
+        "legacy_id",
+        "epoch",
+        "authored_revision",
+        "operational_revision",
+        "semantic_digest",
+        "lease_id",
+        "ledger_revision"
+      ],
+      "properties": {
+        "bead_id": {
+          "type": "string"
+        },
+        "legacy_id": {
+          "type": "string"
+        },
+        "epoch": {
+          "type": "string"
+        },
+        "authored_revision": {
+          "type": "integer"
+        },
+        "operational_revision": {
+          "type": "integer"
+        },
+        "semantic_digest": {
+          "type": "string"
+        },
+        "lease_id": {
+          "type": "string"
+        },
+        "ledger_revision": {
+          "type": "integer"
+        }
+      }
+    }
+  }
+}

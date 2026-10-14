@@ -142,7 +142,7 @@ def encode(row):
 
 
 def decode(issue):
-    row = issue.get('metadata', {}).get('proof')
+    row = (issue.get('metadata') or {}).get('proof')
     if not isinstance(row, dict) or row.get('schema') != SCHEMA:
         if issue.get('id', '').startswith('pw-') and not issue.get('id', '').startswith(('pw-op-', 'pw-event-', 'pw-coordination')):
             raise Refused('missing or unsupported project metadata')

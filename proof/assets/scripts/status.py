@@ -55,10 +55,12 @@ def designs_owed(city, rigs):
         if os.path.join(clone, "scripts") not in sys.path:
             sys.path.insert(0, os.path.join(clone, "scripts"))
         import importlib
+        import work_authority as wa
         dm = importlib.import_module("docs_model")
         catalog = importlib.import_module("build_mockup_catalog")
         agreements = catalog.load_agreements()
-        corpus = dm.Corpus.load(os.path.join(clone, "docs"))
+        # Under the Beads authority the corpus is the client snapshot's (ADR-0236).
+        corpus = wa.corpus(clone) if wa.beads(clone) else dm.Corpus.load(os.path.join(clone, "docs"))
     except Exception as exc:  # noqa: BLE001 - one line, never a broken screen
         return [], "cannot read the backlog or the agreements: %s" % exc
 

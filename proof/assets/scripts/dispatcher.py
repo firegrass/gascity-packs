@@ -58,6 +58,7 @@ from types import SimpleNamespace
 import factory_lib as fl
 import livetest_contract as lt
 import test_companions
+import work_authority as wa
 from factory_lib import admit
 
 ME = "dispatcher"
@@ -184,8 +185,13 @@ def overlapping(backlog, frontier, item, extra_scopes=(), planned=()):
     return ""
 
 
-def shape_digest(backlog, rel):
-    """What the item ASKS, hashed — the file without its claim and status lines."""
+def shape_digest(backlog, rel, item_id=None):
+    """What the item ASKS, hashed — the file without its claim and status lines.
+    Under the Beads authority it is the ledger row's semantic digest, which
+    excludes exactly those lines."""
+    if wa.beads(backlog):
+        row = wa.row(backlog, item_id) if item_id else None
+        return str((row or {}).get("semantic_digest") or "")
     text = fl.sh(["git", "-C", backlog, "show", "HEAD:" + rel])
     return hashlib.sha1(fl.shaped(text.stdout).encode("utf-8")).hexdigest() if text.returncode == 0 and rel else ""
 
@@ -243,6 +249,7 @@ def known_except_reshaped(backlog, frontier, packets, reason_of=None, said=None)
     paths = {item["id"]: item["path"] for item in frontier.get("ready", [])
              if item.get("status") == "open" and item.get("claim") == "none"}
     reshaped = {}
+    native = wa.beads(backlog)
     for packet in packets:
         if packet["state"] != "declined" or packet["bead"].get("status") == "closed":
             continue
@@ -250,15 +257,21 @@ def known_except_reshaped(backlog, frontier, packets, reason_of=None, said=None)
         claim_commit = packet["md"].get("proof.claim_commit")
         if not rel or not claim_commit:
             continue
-        given = fl.sh(["git", "-C", backlog, "show", "%s:%s" % (claim_commit, rel)])
-        today = fl.sh(["git", "-C", backlog, "show", "HEAD:" + rel])
-        if given.returncode != 0 or today.returncode != 0:
-            continue
         reason = reason_of(packet) if reason_of else ""
-        why = fl.triaged(given.stdout, today.stdout, reason)
+        if native:
+            row = wa.row(backlog, packet["id"])
+            why = fl.triaged_row(packet["md"], row, reason)
+            edited = bool(row) and (row.get("semantic_digest") or "") != (packet["md"].get("proof.packet_digest") or "")
+        else:
+            given = fl.sh(["git", "-C", backlog, "show", "%s:%s" % (claim_commit, rel)])
+            today = fl.sh(["git", "-C", backlog, "show", "HEAD:" + rel])
+            if given.returncode != 0 or today.returncode != 0:
+                continue
+            why = fl.triaged(given.stdout, today.stdout, reason)
+            edited = fl.shaped(given.stdout) != fl.shaped(today.stdout)
         if not why:
             reshaped[packet["id"]] = packet
-        elif said is not None and fl.shaped(given.stdout) != fl.shaped(today.stdout):
+        elif said is not None and edited:
             said.say("triage:" + packet["id"], "skip %s: %s" % (packet["id"], why))
     return {packet["id"] for packet in packets} - set(reshaped), reshaped
 
@@ -280,11 +293,31 @@ def review_hold(backlog, policy_rig, item):
             "`review: required` in its frontmatter, or hand-admit it with --review" % item["id"])
 
 
-def release(backlog, seat, refused, policy):
+def release(backlog, seat, refused, policy, leases=None):
     """Give back, in one commit, the claims of items admission refused AFTER the
     claim landed. Preflight makes this rare — main moved between the two, or the
     refusal is one only admission can make — but a claim with no packet behind it
-    holds its write scope against the queue for twelve hours, so it never stays."""
+    holds its write scope against the queue for twelve hours, so it never stays.
+
+    Under the Beads authority the release goes through the client with the
+    lease the claim printed (`leases`), or the one the snapshot row carries;
+    nothing lands on main."""
+    if wa.beads(backlog):
+        gone = []
+        for pid, why in refused:
+            lease = (leases or {}).get(pid) or wa.lease_of(backlog, pid, seat, fresh=True)
+            if not lease:
+                fl.log(ME, "could not release %s: no lease for %s in the ledger" % (pid, seat))
+                continue
+            try:
+                wa.client(backlog, "release", item=pid, by=seat, lease=lease)
+                gone.append(pid)
+            except fl.Refused as exc:
+                fl.log(ME, "could not release %s: %s" % (pid, str(exc)[-200:]))
+        wa.forget(backlog)
+        if gone:
+            fl.log(ME, "released %s in the work ledger: admission refused after the claim" % ", ".join(gone))
+        return
     try:
         with fl.backlog_write():
             gone = []
@@ -332,11 +365,20 @@ def wants_review(policy_rig, item):
 
 
 def claim_with_companions(backlog, item, repo, files, seat, hours, max_depth=1):
-    """Publish exact test scope with the ordinary claim; restore on a refused claim."""
+    """Publish exact test scope with the ordinary claim; restore on a refused claim.
+
+    Under the Beads authority the item is not a file: the claim goes through
+    `next_work.py --claim` as before (the ledger behind it), and no companion
+    scope is written — widening a record is a ledger edit, not a file edit."""
     path, fm, _body, dm = admit.load_item(backlog, item['id'])
     claim_state, _detail = dm.claim(SimpleNamespace(fm=fm), now())
     if claim_state == "live" and fm.get("claimed_by") == seat:
         return subprocess.CompletedProcess([], 1, "", "already claimed by %s in an overlapping pass" % seat), []
+    if wa.beads(backlog):
+        result = fl.sh([sys.executable, 'scripts/next_work.py', '--claim', item['id'], '--by', seat,
+                        '--hours', str(hours)], cwd=backlog)
+        wa.forget(backlog)
+        return result, []
     path = Path(path)
     original = path.read_text()
     updated, added = test_companions.scope_update(original, fm, dm, repo, files, max_depth)
@@ -412,6 +454,20 @@ def dispatch(city, policy, said, dry_run):
     states = fl.rig_states(city)
     backlog = admit.backlog_clone_of(rigs)
     evidence_context = {"rigs": rigs, "refreshed": set()}
+
+    # The work authority marker (ADR-0236). A write freeze admits and claims
+    # nothing under either authority; under Beads nothing new is admitted
+    # unless the pack's retention state is fresh, healthy and replicated.
+    if wa.frozen(backlog):
+        said.say("freeze", "nothing dispatched: %s" % wa.FREEZE_REASON)
+        return 0
+    native = wa.beads(backlog)
+    if native:
+        why = wa.retention_problem(city)
+        if why:
+            said.say("retention", "nothing dispatched under the beads work authority: %s" % why)
+            return 0
+        wa.forget(backlog)
 
     why = fl.budget_hold(policy, rigs)
     if why:
@@ -496,6 +552,7 @@ def dispatch(city, policy, said, dry_run):
         # One refused on infrastructure is retaken an hour later (`held_reason`).
         held = said.section("refused_after_claim")
         paths = {i["id"]: i.get("path") or "" for i in frontier.get("ready", []) + frontier.get("claimed", [])}
+        leases = {}                           # the lease each claim of this pass printed (Beads)
 
         # 2. claims without a bead, or interrupted before sling or its record write
         for item in frontier.get("claimed", []):
@@ -580,7 +637,7 @@ def dispatch(city, policy, said, dry_run):
                                 break                # nothing further down the queue can use this pass
                             continue                 # a live item further down may still take, or wait on, the slot
                         before = held.get(item["id"])
-                        still = held_reason(before, shape_digest(backlog, paths.get(item["id"], "")), now()) if before else ""
+                        still = held_reason(before, shape_digest(backlog, paths.get(item["id"], ""), item["id"]), now()) if before else ""
                         if still:
                             said.say("held:" + item["id"], "skip %s: %s" % (item["id"], still))
                             continue
@@ -609,6 +666,9 @@ def dispatch(city, policy, said, dry_run):
                                                             cfg.get('test_companion_import_depth', 1))
                         if claim.returncode == 0:
                             batch.append(item)
+                            lease = wa.printed_lease(claim.stdout)
+                            if lease:
+                                leases[item["id"]] = lease
                             if level:
                                 live_free = live_room = False
                             else:
@@ -628,7 +688,11 @@ def dispatch(city, policy, said, dry_run):
                     if refused:
                         fl.log(ME, "rig %s: would release %s" % (rig, ", ".join(pid for pid, _ in refused)))
                     continue
-                if ids:
+                if ids and native:
+                    # The claims are in the ledger already; there is no record to land.
+                    fl.log(ME, "rig %s: claimed %s in the work ledger%s" % (
+                        rig, ", ".join(ids), " (leases %s)" % ", ".join(leases[i] for i in ids if i in leases) if leases else ""))
+                elif ids:
                     epics = sorted({i.get("parentEpic") for i in batch if i.get("parentEpic")})
                     landed = fl.land_backlog_change(
                         backlog,
@@ -644,7 +708,7 @@ def dispatch(city, policy, said, dry_run):
         except fl.BacklogBusy:
             # No edit began. Release earlier refused claims independently.
             if refused:
-                release(backlog, seat, refused, policy)
+                release(backlog, seat, refused, policy, leases)
             continue
 
         # 4. admit
@@ -668,10 +732,10 @@ def dispatch(city, policy, said, dry_run):
                 # A live test that lost the slot to a direct admission is deferred,
                 # not refused: its claim goes back, and nothing holds it out later.
                 if outcome != "waits":
-                    held[item["id"]] = hold_entry(why, shape_digest(backlog, paths.get(item["id"], "")),
+                    held[item["id"]] = hold_entry(why, shape_digest(backlog, paths.get(item["id"], ""), item["id"]),
                                                   outcome, now())
         if refused:
-            release(backlog, seat, refused, policy)
+            release(backlog, seat, refused, policy, leases)
     return 0
 
 
