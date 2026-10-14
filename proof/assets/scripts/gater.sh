@@ -49,7 +49,7 @@ trap 'rm -f "$LOG"' EXIT
 # proof_run_gates applies them. A session's own environment never reaches it.
 sandbox_path() {
   local dirs="" t d
-  for t in bd gc dolt jq; do
+  for t in "bd" gc dolt jq; do
     d="$(dirname -- "$(command -v "$t" 2>/dev/null || echo /usr/bin/$t)")"
     case ":$dirs:" in *":$d:"*) ;; *) dirs="${dirs:+$dirs:}$d" ;; esac
   done
@@ -115,7 +115,7 @@ tail -40 "$LOG" >&2
 tail_text="$(tail -40 "$LOG" | cut -c1-300)"
 lane="$(sed -n 's/^gate-fact: lane=//p' "$LOG" | tail -1)"
 scorecard="$(sed -n 's/^scorecard: //p' "$LOG" | paste -sd ';' - | sed 's/;/; /g' | cut -c1-300)"
-bd update "$bead" \
+gc bd update "$bead" \
   --set-metadata "proof.gate_result=$result" \
   --set-metadata "proof.gate_tree=$TREE" \
   --set-metadata "proof.gate_commit=$COMMIT" \
@@ -127,7 +127,7 @@ bd update "$bead" \
   --set-metadata "proof.scorecard=$scorecard" \
   --set-metadata "proof.gate_log_tail=$tail_text" >/dev/null \
   || { say "could not record the result on $bead"; exit 1; }
-bd update "$bead" --set-metadata gc.outcome=pass --set-metadata gc.work_outcome=no-op \
+gc bd update "$bead" --set-metadata gc.outcome=pass --set-metadata gc.work_outcome=no-op \
   --status closed >/dev/null \
   || { say "could not close $bead"; exit 1; }
 say "closed $bead"

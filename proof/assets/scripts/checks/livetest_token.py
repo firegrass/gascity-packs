@@ -201,8 +201,40 @@ def render(argv):
     return " ".join(argv)
 
 
+def safe_problem(problem):
+    """Report the violated rule, never input-bearing credential diagnostics."""
+    reasons = (
+        ("the token is not valid", "credential is not yet valid"),
+        ("no ValidityWindow", "credential has no expiry"),
+        ("the token expired", "credential has expired"),
+        ("the token has", "credential cannot cover the exercise and cleanup window"),
+        ("the token is valid", "credential lifetime exceeds the permitted ceiling"),
+        ("the token is scoped", "credential app scope does not match the trusted target (wrong app)"),
+        ("no Apps caveat", "credential lacks the required single-app restriction"),
+        ("an observe-tier", "observe credentials must not authorize execution"),
+        ("no Organization", "credential lacks organization scope"),
+        ("the narrowest Organization", "observe credentials require read-only organization scope"),
+        ("this is a read-only", "execution requires a restricted machine-exec credential"),
+        ("a mutate-tier", "execution credential lacks a command allowlist"),
+        ("a spend-tier", "execution credential lacks a command allowlist"),
+        ("the packet names", "credential does not cover a requested command"),
+        ("the token allows", "credential authorizes commands outside the selected tier"),
+    )
+    for prefix, diagnostic in reasons:
+        if problem.startswith(prefix):
+            return diagnostic
+    return "credential restrictions do not satisfy the trusted policy"
+
+
+class QuietArgumentParser(argparse.ArgumentParser):
+    def error(self, message):
+        # argparse normally echoes the rejected value, which may itself be a
+        # credential accidentally supplied in the wrong argument position.
+        self.exit(2, "REFUSE - invalid credential-check arguments.\n")
+
+
 def main():
-    ap = argparse.ArgumentParser()
+    ap = QuietArgumentParser(prog="proof-credential-check")
     ap.add_argument("--exercise", required=True, choices=["observe", "mutate", "spend"])
     ap.add_argument("--app", required=True,
                     help="the target the packet was admitted against, by name")
@@ -216,7 +248,7 @@ def main():
 
     target = TRUSTED_TARGETS.get(args.app)
     if target is None:
-        print("REFUSE - no trusted target descriptor for %r." % args.app)
+        print("REFUSE - no trusted target descriptor for the requested target.")
         print("A live test runs only against a target this orchestrator carries in "
               "checked-in code, because the app id, the cleanup margin and the "
               "permitted commands are not things a packet may supply. Known: %s"
@@ -226,16 +258,14 @@ def main():
         print("REFUSE - --max-exercise-seconds must be positive.")
         return 64
     if args.max_exercise_seconds > target["max_exercise_seconds"]:
-        print("REFUSE - the packet declares a %d-second exercise against %s, over the "
-              "%d-second ceiling this orchestrator allows for that target."
-              % (args.max_exercise_seconds, args.app, target["max_exercise_seconds"]))
+        print("REFUSE - the declared exercise exceeds the trusted target's duration ceiling.")
         return 2
 
     raw = sys.stdin.read()
     try:
         doc = json.loads(raw)
     except Exception as exc:
-        print("REFUSE - could not read the token's caveats (%s)." % exc)
+        print("REFUSE - could not read the credential caveats.")
         print("`flyctl tokens debug` must succeed before a live test may start.")
         return 2
     if not isinstance(doc, list):
@@ -245,7 +275,7 @@ def main():
     try:
         f = collect(doc)
     except Ambiguous as exc:
-        print("REFUSE - the token's caveats are not unambiguous: %s." % exc)
+        print("REFUSE - the credential caveats are not unambiguous.")
         print("An unreadable restriction is not an absent one. Re-issue the "
               "credential with the flags ADR-0152 names rather than widening this "
               "check to accept it.")
@@ -358,17 +388,12 @@ def main():
                            "; ".join(render(p) for p in permitted) or "(nothing)"))
 
     if problems:
-        print("REFUSE - the %s-tier credential does not match the packet:" % args.exercise)
+        print("REFUSE - the credential does not match the packet:")
         for p in problems:
-            print("  - %s" % p)
+            print("  - " + safe_problem(p))
         return 2
 
-    detail = "read-only org token" if args.exercise == "observe" else (
-        "%d allow-listed command(s) on app %s" % (len(allowed), target["app_id"]))
-    mins = (f["not_after"] - now) // 60
-    print("OK - %s-tier credential for %s: %s, %d minutes of validity left, "
-          "covering a %ds exercise plus a %ds cleanup margin."
-          % (args.exercise, args.app, detail, mins, args.max_exercise_seconds, margin))
+    print("OK - credential matches the requested tier, target and exercise duration.")
     return 0
 
 

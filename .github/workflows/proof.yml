@@ -35,4 +35,6 @@ jobs:
         run: |
           python3 -m unittest discover -s proof/tests -v
           python3 proof/assets/scripts/check_entrypoints.py proof
+          bash proof/tests/test_checks.sh
+          bash proof/tests/test_livetest_credentials.sh
           python3 proof/tests/run_native.py

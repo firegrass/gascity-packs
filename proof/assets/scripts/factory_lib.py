@@ -726,18 +726,18 @@ def recorded_pr_url(city, rig, packet):
 
 
 def set_bead(city, rig, bead_id, **metadata):
-    args = ["bd", "--rig", rig, "update", bead_id]
+    args = ["--rig", rig, "update", bead_id]
     for key, value in metadata.items():
         args += ["--set-metadata", "%s=%s" % (key.replace("__", "."), value)]
-    return admit.gc(city, *args, check=False)
+    return admit.gc(city, "bd", *args, check=False)
 
 
 def unset_bead(city, rig, bead_id, *keys):
     """Remove metadata keys. Writing "" does not clear one, so a claim is dropped this way."""
-    args = ["bd", "--rig", rig, "update", bead_id]
+    args = ["--rig", rig, "update", bead_id]
     for key in keys:
         args += ["--unset-metadata", key]
-    return admit.gc(city, *args, check=False)
+    return admit.gc(city, "bd", *args, check=False)
 
 
 def mail(subject, body):

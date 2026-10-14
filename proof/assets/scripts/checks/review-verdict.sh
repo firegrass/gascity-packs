@@ -18,7 +18,7 @@ ROOT_JSON="$(proof_root_json)"
 ROOT_ID="$(printf '%s\n' "$ROOT_JSON" | jq -r '(if type=="array" then .[0] else . end).id')"
 proof_load_packet "$ROOT_JSON"
 
-REVIEWS="$(bd list --all --metadata-field "gc.root_bead_id=$ROOT_ID" --json --limit=0 2>/dev/null || printf '[]')"
+REVIEWS="$(gc bd list --all --metadata-field "gc.root_bead_id=$ROOT_ID" --json --limit=0 2>/dev/null || printf '[]')"
 LATEST="$(printf '%s\n' "$REVIEWS" | jq -c '
   [ .[] | select((.metadata["proof.review_verdict"] // "") != "")
         | select((.metadata["gc.kind"] // "") as $kind | $kind == "" or $kind == "task") ]
@@ -47,9 +47,9 @@ if [ "$VERDICT" != "approve" ]; then
     [ "$VERDICT" = "reject" ] && REASON=review_rejected
     # The findings are the reviewer's notes: data, stored, never evaluated.
     FINDINGS="$(printf '%s\n' "$LATEST" | jq -r '(.notes // "")[0:4000]')"
-    bd update "$LATEST_ID" --set-metadata "gc.failure_reason=$REASON" >/dev/null 2>&1 \
+    gc bd update "$LATEST_ID" --set-metadata "gc.failure_reason=$REASON" >/dev/null 2>&1 \
       || echo "proof-check: could not record $REASON on review $LATEST_ID" >&2
-    bd update "$ROOT_ID" \
+    gc bd update "$ROOT_ID" \
       --set-metadata "proof.review_failure_reason=$REASON" \
       --set-metadata "proof.outstanding_findings_bead=$LATEST_ID" \
       --set-metadata "proof.outstanding_findings=$FINDINGS" >/dev/null 2>&1 \
@@ -79,7 +79,7 @@ fi
 # to prove it is built on top of what was reviewed (see land-on-main.sh), and a
 # tree hash alone cannot say which history it belongs to.
 proof_verify_contract "$ROOT_JSON"
-bd update "$ROOT_ID" \
+gc bd update "$ROOT_ID" \
   --set-metadata "proof.approved_tree=$HEAD_TREE" \
   --set-metadata "proof.approved_commit=$HEAD_COMMIT" \
   --set-metadata "proof.approved_by=reviewer" >/dev/null 2>&1 \

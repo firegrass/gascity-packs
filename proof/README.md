@@ -37,6 +37,8 @@ Uncommitted Dolt history refuses mutation and receipt replay pending reconciliat
 ```sh
 python3 -m unittest discover -s proof/tests -v
 python3 proof/tests/run_native.py
+bash proof/tests/test_checks.sh
+bash proof/tests/test_livetest_credentials.sh
 python3 proof/assets/scripts/check_entrypoints.py proof
 ```
 
@@ -47,3 +49,9 @@ exercise the canonical Python policy and same-seat replacement leases.
 
 These are rehearsal tests, not authority-switch or retention qualification.
 Private-corpus import and compatibility tests remain in the orchestrator.
+
+Factory helpers route execution-ledger operations through Gas City's adapter.
+The standalone native qualification harness owns an isolated database and keeps
+its administrative bypass controls there. Credential verdicts and argument
+errors report policy rules without echoing supplied credential material.
+Fork CI uses GitHub-hosted Ubuntu runners; upstream retains Blacksmith runners.

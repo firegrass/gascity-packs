@@ -12,7 +12,7 @@ BEAD="$1" REASON="$2"
 [[ "$REASON" =~ ^[A-Za-z0-9_.:-]{1,160}$ ]] || die "a failure_reason is a short token ([A-Za-z0-9_.:-]), not prose: $REASON"
 if [ -n "${GC_RIG_ROOT:-}" ]; then cd "$GC_RIG_ROOT"; fi
 
-SELF="$(bd show "$BEAD" --json 2>/dev/null)" || die "cannot read bead $BEAD"
+SELF="$(gc bd show "$BEAD" --json 2>/dev/null)" || die "cannot read bead $BEAD"
 meta() { printf '%s\n' "$SELF" | jq -r --arg k "$1" '(if type=="array" then .[0] else . end) | .metadata[$k] // empty'; }
 STATUS="$(printf '%s\n' "$SELF" | jq -r '(if type=="array" then .[0] else . end) | .status // empty')"
 [ "$STATUS" != "closed" ] || die "bead $BEAD is already closed"
@@ -27,7 +27,7 @@ case "$KIND" in
   ""|task) ;;
   *) die "bead $BEAD is gc.kind=$KIND, the orchestrator's, not a step: never close it — put it back with \`gc bd update $BEAD --assignee \"\" --force\` and claim again" ;;
 esac
-bd update "$BEAD" \
+gc bd update "$BEAD" \
   --set-metadata gc.outcome=fail \
   --set-metadata gc.failure_class=hard \
   --set-metadata "gc.failure_reason=$REASON" \

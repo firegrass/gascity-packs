@@ -69,7 +69,7 @@ python3 "$HERE/design_scope.py" \
   >"$EXPANDED_FILE" || exit 1
 # What the diff touched outside the declared scope, `repo:path` a line, "" when
 # nothing: the cost of ADR-0159, measured rather than assumed.
-bd update "$(proof_root_id "$ROOT_JSON")" \
+gc bd update "$(proof_root_id "$ROOT_JSON")" \
   --set-metadata "proof.scope_expansion=$(cat "$EXPANDED_FILE")" >/dev/null 2>&1 \
   || proof_die "could not record the scope expansion on the workflow root"
 
@@ -88,7 +88,7 @@ proof_stamp_validated "$ROOT_JSON"
 # The design this tree was built to, recorded where the pull request, the
 # reviewer and the daily report can all read it. "" when nothing renders.
 if [ -n "$DESIGN" ]; then
-  bd update "$(proof_root_id "$ROOT_JSON")" \
+  gc bd update "$(proof_root_id "$ROOT_JSON")" \
     --set-metadata "proof.design_built=$DESIGN" >/dev/null 2>&1 \
     || proof_die "could not record the design this tree was built to"
 fi
@@ -98,7 +98,7 @@ fi
 if [ "$(root_var "$ROOT_JSON" review)" != "true" ]; then
   APPROVED_BY=gate
   [ -z "$RECOVERY_REVIEW" ] || APPROVED_BY=reviewer
-  bd update "$(proof_root_id "$ROOT_JSON")" \
+  gc bd update "$(proof_root_id "$ROOT_JSON")" \
     --set-metadata "proof.approved_tree=$HEAD_TREE" \
     --set-metadata "proof.approved_commit=$HEAD_COMMIT" \
     --set-metadata "proof.approved_by=$APPROVED_BY" >/dev/null 2>&1 \

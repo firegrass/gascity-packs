@@ -51,7 +51,7 @@ git -C "$WORK_DIR" fetch --quiet origin "$BASE" \
 UPSTREAM="origin/$BASE"
 
 record_landed() {
-  bd update "$ROOT_ID" \
+  gc bd update "$ROOT_ID" \
     --set-metadata "proof.landed_commit=$HEAD_COMMIT" \
     --set-metadata "proof.landed_tree=$HEAD_TREE" >/dev/null 2>&1 \
     || proof_die "landed, but could not record it on $ROOT_ID"
@@ -71,7 +71,7 @@ republish() {
     state=ok
   fi
   echo "proof-check: shared checkout $shared republish: $state" >&2
-  bd update "$ROOT_ID" --set-metadata "proof.republished=$state" >/dev/null 2>&1 \
+  gc bd update "$ROOT_ID" --set-metadata "proof.republished=$state" >/dev/null 2>&1 \
     || echo "proof-check: could not record shared-checkout republish state ($state)" >&2
 }
 

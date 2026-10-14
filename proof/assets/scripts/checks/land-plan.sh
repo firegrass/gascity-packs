@@ -42,7 +42,7 @@ UPSTREAM="origin/$BASE"
 # Mirrors land-on-main.sh deliberately: the two landing checks share their
 # safety, not their code, so a change to one can never silently move the other.
 record_landed() {
-  bd update "$ROOT_ID" \
+  gc bd update "$ROOT_ID" \
     --set-metadata "proof.landed_commit=$HEAD_COMMIT" \
     --set-metadata "proof.landed_tree=$HEAD_TREE" \
     --set-metadata "proof.plan_outcome=landed" >/dev/null 2>&1 \
@@ -59,7 +59,7 @@ republish() {
     state=ok
   fi
   echo "proof-check: shared checkout $shared republish: $state" >&2
-  bd update "$ROOT_ID" --set-metadata "proof.republished=$state" >/dev/null 2>&1 \
+  gc bd update "$ROOT_ID" --set-metadata "proof.republished=$state" >/dev/null 2>&1 \
     || echo "proof-check: could not record shared-checkout republish state ($state)" >&2
 }
 
@@ -72,7 +72,7 @@ if git -C "$WORK_DIR" merge-base --is-ancestor HEAD "$UPSTREAM"; then
   else
     echo "proof-check: the planning run added nothing to $BASE" >&2
     if [ "$VERIFY_ONLY" = 0 ]; then
-      bd update "$ROOT_ID" --set-metadata "proof.plan_outcome=no-op" >/dev/null 2>&1 \
+      gc bd update "$ROOT_ID" --set-metadata "proof.plan_outcome=no-op" >/dev/null 2>&1 \
         || proof_die "could not record the planning no-op outcome"
     fi
   fi

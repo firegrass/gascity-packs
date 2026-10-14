@@ -236,15 +236,15 @@ def heal(city, rig, beads, now, said, dry_run, sessions=()):
     for root, action, holder in root_faults(beads, now):
         if action == "unassign":
             what = "workflow root %s was held by session %s, masking that session's own steps" % (root, holder)
-            args = ["bd", "--rig", rig, "update", root, "--assignee", "", "--force"]
+            args = ["--rig", rig, "update", root, "--assignee", "", "--force"]
             freed.append(holder)
         else:
             what = "workflow root %s had been put back to `open`, where the worker pool's query offers it" % root
-            args = ["bd", "--rig", rig, "update", root, "--status", "in_progress"]
+            args = ["--rig", rig, "update", root, "--status", "in_progress"]
         if dry_run:
             fl.log(ME, "rig %s: would restore — %s" % (rig, what))
             continue
-        done = admit.gc(city, *args, check=False)
+        done = admit.gc(city, "bd", *args, check=False)
         if done.returncode == 0:
             fl.log(ME, "rig %s: %s; restored to in_progress and unassigned" % (rig, what))
         else:

@@ -277,6 +277,14 @@ def test_shipped_pack_assets_route_beads_commands_through_gc() -> None:
     for path in tracked_files():
         if path.resolve() == THIS_FILE:
             continue
+        # Native Beads qualification owns an isolated SQL server/workspace and
+        # explicitly proves that raw administration bypasses pack acceptance.
+        # Do not route that negative control through an execution city.
+        if path.relative_to(REPO_ROOT) in {
+            Path("proof/tests/run_native.py"),
+            Path("proof/work-helper/checked_test.go"),
+        }:
+            continue
         try:
             text = path.read_text(encoding="utf-8")
         except UnicodeDecodeError:

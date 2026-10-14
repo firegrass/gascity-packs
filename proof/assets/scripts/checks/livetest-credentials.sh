@@ -29,14 +29,14 @@ while [ $# -gt 0 ]; do
     --app)      app="${2:?--app needs a value}"; shift 2 ;;
     --max-exercise-seconds) max_seconds="${2:?--max-exercise-seconds needs a value}"; shift 2 ;;
     --verb)     verbs+=("${2:?--verb needs a value}"); shift 2 ;;
-    *) echo "$ME: unknown argument: $1" >&2; exit 64 ;;
+    *) echo "$ME: unknown argument" >&2; exit 64 ;;
   esac
 done
 
 case "$exercise" in
   observe|mutate|spend) ;;
   "") echo "$ME: --exercise is required (observe|mutate|spend)"; exit 64 ;;
-  *)  echo "$ME: --exercise must be observe, mutate or spend, not '$exercise'"; exit 64 ;;
+  *)  echo "$ME: --exercise must be observe, mutate or spend"; exit 64 ;;
 esac
 [ -n "$app" ] || { echo "$ME: --app is required"; exit 64; }
 case "$max_seconds" in
@@ -44,7 +44,7 @@ case "$max_seconds" in
       echo "the whole exercise deadline plus its cleanup margin, and an undeclared"
       echo "deadline cannot be checked against anything."; exit 64 ;;
   *[!0-9]*|0) echo "$ME: --max-exercise-seconds must be a positive whole number of seconds,"
-      echo "not '$max_seconds'."; exit 64 ;;
+      echo "the supplied deadline is invalid."; exit 64 ;;
 esac
 
 # A mutate or spend packet must say what it will run before anything is judged:
@@ -85,7 +85,7 @@ if [ -z "$declared" ]; then
 fi
 if [ "$declared" != "$exercise" ]; then
   echo "$ME: REFUSE — tier mismatch: packet admitted at '$exercise', running agent"
-  echo "declares '$declared'. The credential in scope is not the one this packet"
+  echo "declares a different tier. The credential in scope is not the one this packet"
   echo "was authorized against. Sling it at proof.tester-$exercise."
   exit 12
 fi

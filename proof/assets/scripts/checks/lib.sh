@@ -23,12 +23,12 @@ metadata_of() {
 proof_root_json() {
   [ -n "${GC_BEAD_ID:-}" ] || proof_die "GC_BEAD_ID is required"
   local self root
-  self="$(bd show "$GC_BEAD_ID" --json 2>/dev/null)" || proof_die "cannot read bead $GC_BEAD_ID"
+  self="$(gc bd show "$GC_BEAD_ID" --json 2>/dev/null)" || proof_die "cannot read bead $GC_BEAD_ID"
   root="$(metadata_of "$self" gc.root_bead_id)"
   if [ -z "$root" ] || [ "$root" = "$GC_BEAD_ID" ]; then
     printf '%s\n' "$self"
   else
-    bd show "$root" --json 2>/dev/null || proof_die "cannot read workflow root $root"
+    gc bd show "$root" --json 2>/dev/null || proof_die "cannot read workflow root $root"
   fi
 }
 
@@ -133,7 +133,7 @@ proof_gate_record() {
   local root loop="${2:-implement}" step=gate
   [ "$loop" = review-cycle ] && step=review-gate
   root="$(proof_root_id "$1")"
-  bd list --all --metadata-field "gc.root_bead_id=$root" --json --limit=0 2>/dev/null \
+  gc bd list --all --metadata-field "gc.root_bead_id=$root" --json --limit=0 2>/dev/null \
     | jq -c --arg root "$root" --arg it "${GC_ITERATION:-}" --arg loop "$loop" --arg step "$step" '
         [ (if type == "array" then .[] else . end)
           | select(.status == "closed")
@@ -208,7 +208,7 @@ proof_lane_gate() {
 proof_skip_first_apply_findings() {
   local root id
   root="$(proof_root_id "$1")"
-  id="$(bd list --all --metadata-field "gc.root_bead_id=$root" --json --limit=0 2>/dev/null \
+  id="$(gc bd list --all --metadata-field "gc.root_bead_id=$root" --json --limit=0 2>/dev/null \
     | jq -r --arg root "$root" '
         [ (if type == "array" then .[] else . end)
           | select(.status == "open")
@@ -217,7 +217,7 @@ proof_skip_first_apply_findings() {
           | select((.metadata["gc.step_ref"] // "") | test("(^|[.])review-cycle[.]iteration[.]1[.]apply-findings$")) | .id ]
         | first // empty' 2>/dev/null)" || true
   [ -n "$id" ] || return 0
-  if bd update "$id" \
+  if gc bd update "$id" \
        --set-metadata gc.outcome=pass \
        --set-metadata gc.work_outcome=no-op \
        --set-metadata "proof.skipped_by=implement-check: no review before the first" \
@@ -233,7 +233,7 @@ proof_stamp_validated() {
   local root_json="$1" root_id
   proof_verify_contract "$root_json"
   root_id="$(proof_root_id "$root_json")"
-  bd update "$root_id" \
+  gc bd update "$root_id" \
     --set-metadata "proof.validated_commit=$HEAD_COMMIT" \
     --set-metadata "proof.validated_tree=$HEAD_TREE" >/dev/null 2>&1 \
     || proof_die "could not record validated tree on $root_id"
