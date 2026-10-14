@@ -1,0 +1,11 @@
+# One verified full-history copy of the work ledger an hour, into
+# <PROOF_WORK_BACKUP_ROOT>/hourly/<UTC ts>/, the first of each UTC day promoted
+# into daily/; 24 hourly and 30 daily copies are kept, and a copy that fails
+# its restore check is never deleted. A script: no agent, no model, no tokens.
+[order]
+description = "Take and verify an hourly full-history backup of the PROOF work ledger"
+trigger = "cooldown"
+interval = "1h"
+scope = "city"
+timeout = "30m"
+exec = "$PACK_DIR/assets/scripts/work_maintenance.py backup"

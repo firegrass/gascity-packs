@@ -1,0 +1,14 @@
+# Push the work ledger's main to the orchestrator git remote under
+# refs/dolt/liskov-work-beads, every minute: the normal off-host recovery
+# point is one minute (ADR-0236), and admission refuses when the last
+# confirmed push is more than five minutes old. A script on the city: no
+# agent, no model, no tokens. The city supplies PROOF_WORK_WORKSPACE and
+# PROOF_WORK_REMOTE through [[orders.overrides]]; see
+# proof/docs/work-retention-install.md.
+[order]
+description = "Replicate the PROOF work ledger to the orchestrator remote under its custom Dolt ref"
+trigger = "cooldown"
+interval = "1m"
+scope = "city"
+timeout = "10m"
+exec = "$PACK_DIR/assets/scripts/work_maintenance.py replicate"
