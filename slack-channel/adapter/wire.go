@@ -101,3 +101,39 @@ type slackReactionsAddResp struct {
 	OK    bool   `json:"ok"`
 	Error string `json:"error,omitempty"`
 }
+
+// slackStoredMessage is the subset of a message object returned by
+// conversations.replies / conversations.history that verify-message reads.
+// Edited is kept raw: its presence (Slack sets {"user","ts"} on an edited
+// message) is the whole signal.
+type slackStoredMessage struct {
+	Type     string          `json:"type,omitempty"`
+	Subtype  string          `json:"subtype,omitempty"`
+	User     string          `json:"user,omitempty"`
+	BotID    string          `json:"bot_id,omitempty"`
+	Team     string          `json:"team,omitempty"`
+	UserTeam string          `json:"user_team,omitempty"`
+	Text     string          `json:"text,omitempty"`
+	TS       string          `json:"ts,omitempty"`
+	ThreadTS string          `json:"thread_ts,omitempty"`
+	Edited   json.RawMessage `json:"edited,omitempty"`
+}
+
+// slackMessagesResp is the shared response shape of conversations.replies
+// and conversations.history.
+type slackMessagesResp struct {
+	OK               bool                 `json:"ok"`
+	Error            string               `json:"error,omitempty"`
+	Messages         []slackStoredMessage `json:"messages,omitempty"`
+	HasMore          bool                 `json:"has_more,omitempty"`
+	ResponseMetadata struct {
+		NextCursor string `json:"next_cursor,omitempty"`
+	} `json:"response_metadata,omitempty"`
+}
+
+type slackPermalinkResp struct {
+	OK        bool   `json:"ok"`
+	Error     string `json:"error,omitempty"`
+	Channel   string `json:"channel,omitempty"`
+	Permalink string `json:"permalink,omitempty"`
+}

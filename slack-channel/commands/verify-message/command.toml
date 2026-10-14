@@ -1,0 +1,2 @@
+description = "Ask Slack who wrote a message (answer provenance)"
+run = "../verify-message.sh"

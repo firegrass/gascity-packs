@@ -26,6 +26,9 @@ multi-rig routing, slash-command intake, peer fanout, or file upload of
 - **Per-session identity:** each session posts under its own username +
   avatar (`chat:write.customize`).
 - **React:** `react --emoji eyes` drops a receipt on the latest inbound.
+- **Verify a message:** `verify-message --channel <id> --ts <ts>` asks Slack
+  who wrote a message, in which thread, with what text — answer provenance
+  without handing anyone the bot token.
 
 ## Verbs
 
@@ -42,6 +45,7 @@ flags.
 | `react [--emoji <name>]` | React on the session's latest inbound message. |
 | `identity --as <name> [--avatar-emoji <e>]` | Set the session's Slack username + avatar. |
 | `handle-alias --handle <h> --session <id>` | Map `@<h>` to a session. |
+| `verify-message --channel <id> --ts <ts>` | Ask Slack who wrote a message (see [Verifying a message's author](#verifying-a-messages-author)). |
 
 ## Install
 
@@ -182,6 +186,62 @@ gc slack-channel react --emoji eyes
 gc slack-channel publish --body "nightly build is green"
 ```
 
+## Verifying a message's author
+
+`verify-message` exists for **answer provenance**. When a workflow records a
+person's reply in Slack as their answer, it should not trust text an agent
+relayed: it asks Slack who actually wrote that message. Agents never hold
+`SLACK_BOT_TOKEN`, so the adapter does the asking — `POST /verify-message`
+on its internal listener (the `GC_SERVICE_SOCKET` UDS that only gc's
+`/svc/slack-channel` proxy reaches). It is **not** served on the public
+listener.
+
+```sh
+gc slack-channel verify-message --channel C0123 --ts 1700000000.000500
+```
+
+Request body: `{"channel": "C0123", "ts": "1700000000.000500"}` (both
+required; unknown fields are refused). The adapter calls
+`conversations.replies` (`channel`, `ts`, `oldest`=`latest`=`ts`,
+`inclusive`, `limit=1`, following the cursor), which returns a thread's
+parent first, so it selects the message whose `ts` equals the requested ts
+exactly. When Slack reports `thread_not_found` it falls back to
+`conversations.history` over the same inclusive one-ts window. It then
+fetches `chat.getPermalink`. Both use the `*:history` scopes the manifest
+already requests; no new scope.
+
+Success (`200`):
+
+```json
+{"ok": true, "channel": "C0123", "ts": "1700000000.000500",
+ "thread_ts": "1700000000.000100", "user": "U0OWNER", "text": "eu-west",
+ "permalink": "https://….slack.com/archives/C0123/p1700000000000500",
+ "edited": false}
+```
+
+`thread_ts` is empty for a top-level message (a thread parent included).
+`edited` is true when Slack reports the message was edited after posting, so
+a caller can refuse an answer that changed.
+
+Anything else is a typed refusal — a non-2xx status with
+`{"ok": false, "error": "<code>", "detail": "…"}`, never an empty success:
+
+| Status | `error` | Meaning |
+| --- | --- | --- |
+| 400 | `bad_request` | Malformed JSON, unknown field, missing or invalid `channel`/`ts`. |
+| 404 | `message_not_found` | No message has exactly that ts in that channel. |
+| 422 | `bot_message` | `bot_id` set or subtype `bot_message`. |
+| 422 | `unsupported_subtype` | A system message (join, topic, tombstone…); only plain, `thread_broadcast` and `file_share` messages are a person's words. |
+| 422 | `no_author` | The message carries no `user`. |
+| 403 | `foreign_workspace` | The message's `team`/`user_team` is not `SLACK_WORKSPACE_ID` (the same workspace gate as inbound; an absent team passes). |
+| 502 | `slack_error` | Slack answered `ok: false`; its string is in `slack_error`. |
+| 429 | `rate_limited` | Slack returned HTTP 429; `retry_after` (seconds) and a `Retry-After` header carry Slack's value when it sent one. |
+| 502 | `slack_http_error` | Slack returned another non-2xx status. |
+| 502 | `slack_unreachable` | The adapter could not reach Slack. |
+
+The adapter logs each verification and each refusal's code (never the
+message text).
+
 ## Registries
 
 The adapter owns three on-disk registries under
@@ -275,6 +335,11 @@ understanding before you install:
   messages filed under `SLACK_WORKSPACE_ID` and matched against this
   workspace's channel bindings, so an event whose `team_id` is set and does
   not match is dropped with a log line. Run one workspace per install.
+- **`verify-message` reads messages with the bot token.** Anything that can
+  reach the internal listener can read back any message in a conversation
+  the bot is in, by `channel` + `ts`. That is why it is served only on the
+  internal listener, never the public one; the dev-mode caveat below applies
+  to it as to every verb.
 - **Internal verb listener is loopback / dev-only.** When the adapter is
   *not* run as a gc `proxy_process` service (`GC_SERVICE_SOCKET` unset), the
   verb endpoints are served over plain TCP on `127.0.0.1:8776`

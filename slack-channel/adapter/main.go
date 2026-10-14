@@ -26,8 +26,10 @@
 //
 // Required env:
 //
-//	SLACK_BOT_TOKEN        Bot token (xoxb-...) for chat.postMessage +
-//	                       reactions.add.
+//	SLACK_BOT_TOKEN        Bot token (xoxb-...) for chat.postMessage,
+//	                       reactions.add, and the verify-message reads
+//	                       (conversations.replies/history,
+//	                       chat.getPermalink).
 //	SLACK_SIGNING_SECRET   HMAC secret for verifying Slack request
 //	                       signatures on /slack/events and
 //	                       /slack/interactions.
@@ -96,23 +98,8 @@ func main() {
 	log.Printf("starting gc-slack-channel-adapter inbound=%s internal=%s gc=%s city=%s registry=%s target=%s",
 		inboundDescr, internalDescr, cfg.gcAPIBase, cfg.cityName, cfg.registryDir, cfg.inboundTarget)
 
-	publicMux := http.NewServeMux()
-	publicMux.HandleFunc("/slack/events", srv.handleSlackEvents())
-	publicMux.HandleFunc("/slack/interactions", srv.handleInteractions())
-	publicMux.HandleFunc("/healthz", handleHealthz)
-	publicMux.HandleFunc("/", http.NotFound)
-
-	internalMux := http.NewServeMux()
-	internalMux.HandleFunc("POST /publish", srv.handlePublish())
-	internalMux.HandleFunc("POST /publish-to-channel", srv.handlePublishToChannel())
-	internalMux.HandleFunc("POST /reply-current", srv.handleReplyCurrent())
-	internalMux.HandleFunc("POST /react", srv.handleReact())
-	internalMux.HandleFunc("POST /bindings", srv.handleBind())
-	internalMux.HandleFunc("POST /identity", srv.handleIdentitySet())
-	internalMux.HandleFunc("DELETE /identity", srv.handleIdentityRemove())
-	internalMux.HandleFunc("POST /handle-alias", srv.handleAliasSet())
-	internalMux.HandleFunc("DELETE /handle-alias", srv.handleAliasRemove())
-	internalMux.HandleFunc("/healthz", handleHealthz)
+	publicMux := newPublicMux(srv)
+	internalMux := newInternalMux(srv)
 
 	// ReadTimeout/WriteTimeout bound slow clients on the public,
 	// attacker-reachable listener (the body is unsigned until verified);
@@ -204,6 +191,38 @@ func main() {
 	defer cancel()
 	_ = publicSrv.Shutdown(ctx)
 	_ = internalSrv.Shutdown(ctx)
+}
+
+// newPublicMux is the attacker-reachable listener: Slack's signed callbacks
+// and a health probe, nothing else. No verb endpoint — in particular not
+// /verify-message, which reads messages back with the bot token — may be
+// registered here.
+func newPublicMux(srv *server) *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/slack/events", srv.handleSlackEvents())
+	mux.HandleFunc("/slack/interactions", srv.handleInteractions())
+	mux.HandleFunc("/healthz", handleHealthz)
+	mux.HandleFunc("/", http.NotFound)
+	return mux
+}
+
+// newInternalMux serves the verb endpoints on GC_SERVICE_SOCKET (or the
+// loopback dev listener), reachable only through gc's /svc/slack-channel
+// proxy.
+func newInternalMux(srv *server) *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /publish", srv.handlePublish())
+	mux.HandleFunc("POST /publish-to-channel", srv.handlePublishToChannel())
+	mux.HandleFunc("POST /reply-current", srv.handleReplyCurrent())
+	mux.HandleFunc("POST /react", srv.handleReact())
+	mux.HandleFunc("POST /verify-message", srv.handleVerifyMessage())
+	mux.HandleFunc("POST /bindings", srv.handleBind())
+	mux.HandleFunc("POST /identity", srv.handleIdentitySet())
+	mux.HandleFunc("DELETE /identity", srv.handleIdentityRemove())
+	mux.HandleFunc("POST /handle-alias", srv.handleAliasSet())
+	mux.HandleFunc("DELETE /handle-alias", srv.handleAliasRemove())
+	mux.HandleFunc("/healthz", handleHealthz)
+	return mux
 }
 
 // listenUDS binds a Unix domain socket, removing any stale entry first so
