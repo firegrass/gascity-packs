@@ -31,6 +31,13 @@ jobs:
           tar -xzf "$RUNNER_TEMP/dolt.tar.gz" -C "$RUNNER_TEMP"
           echo "$RUNNER_TEMP/proof-bin" >> "$GITHUB_PATH"
           echo "$RUNNER_TEMP/dolt-linux-amd64/bin" >> "$GITHUB_PATH"
+      - name: Fetch the Gas City compactor the retention qualification runs
+        run: |
+          git init -q "$RUNNER_TEMP/gascity"
+          git -C "$RUNNER_TEMP/gascity" remote add origin https://github.com/firegrass/gascity.git
+          git -C "$RUNNER_TEMP/gascity" fetch -q --depth 1 origin 65121694d11c218f8d7c6210f567e8d6de97b13d
+          git -C "$RUNNER_TEMP/gascity" checkout -q FETCH_HEAD -- examples/bd/dolt
+          echo "GASCITY_CHECKOUT=$RUNNER_TEMP/gascity" >> "$GITHUB_ENV"
       - name: Pure policies and native transaction qualification
         run: |
           python3 -m unittest discover -s proof/tests -v
