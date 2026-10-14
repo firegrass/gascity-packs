@@ -4,6 +4,10 @@ PROOF agents, formulas, validation commands and deterministic factory scripts.
 The existing factory continues to use its Git work authority. Model choices,
 permissions and recovery behavior are preserved from the orchestrator pack.
 
+Cities importing the agents declare the `claude`, `codex` and `grok` provider
+aliases with `base = "builtin:<name>"`. Credentials and operator-specific
+provider patches stay in the city configuration.
+
 The pack owns `assets/scripts/proof_work_policy.py`, the storage-independent
 readiness, ordering, capacity and scope rules. The orchestrator retains Markdown
 parsing, validation and compatibility imports. Public content contains code and
