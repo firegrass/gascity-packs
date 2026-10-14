@@ -12,7 +12,22 @@ Four subcommands, all scripts (no agent, no model, no tokens):
              `daily/`, keep 24 hourly and 30 daily copies.
   doctor     the retention checks ADR-0236 asks for; `ok` false with named
              problems otherwise. Everything fails closed.
+  gc         storage garbage collection through the server (`CALL DOLT_GC()`),
+             reported as a success only when every commit hash in dolt_log and
+             the issue/dependency/event/receipt counts AS OF every commit are
+             the same afterwards (ADR-0236: GC requires proof that reachable
+             history survives). Records bytes before and after.
   status     print the state file and what the ledger says about itself.
+
+A 1.3 GB noms journal was measured after one shadow import of the corpus
+(per-row prolly-tree rewrites inside one transaction); the same corpus
+imported into a disposable server measured 253 MB. Neither the hourly
+backups nor the git-ref push should carry dead chunks of that size, so
+`backup` refuses (`ledger_not_collected:<bytes>`) while the live journal is
+over `--max-journal-bytes` (512 MiB by default) and the doctor reports the
+journal size. `CALL DOLT_GC()` against a sql-server database was observed to
+wait for other connections' running statements and to keep serving
+afterwards; it replaces the journal file with a table file.
 
 State file (read by admission): `<city>/proof/work-retention.json`, schema
 `proof.work-retention.v1`. Each subcommand updates its own section under a
@@ -26,10 +41,16 @@ database is Gas City's to pick. The work ledger is deliberately NOT a rig
 therefore addresses the Dolt sql-server itself, and only with EXPLICIT
 arguments: `--workspace` names the `.beads` directory whose `metadata.json`
 must say `dolt_database: proof_work` (or an isolated `proof_test_*`), and the
-server port comes from that file. Like the work helper, it refuses to run
-when any ambient `BEADS_*` / `BD_*` variable is set: those redirect bd and
-Dolt routing, and a redirected maintenance run would replicate or back up the
-wrong database while reporting success for the right one.
+server port comes from that file. Ambient `BEADS_*` / `BD_*` variables
+redirect bd and Dolt routing, and a redirected maintenance run would
+replicate or back up the wrong database while reporting success for the
+right one; the city's controller sets a dozen `BD_*` variables for every exec
+order, so refusing them (as the work helper does) would refuse every order.
+This script therefore STRIPS every `BEADS_*` / `BD_*` variable from the
+environment of each dolt/bd subprocess, exactly as the orchestrator client
+does before invoking the helper, and records the stripped names in the state
+file as `ambient_overrides_stripped` (informational, never a problem).
+Routing cannot be ambient when the workspace and server are explicit.
 
 Which Dolt mechanism works for a server-mode database (proved on a disposable
 2.3.5 server, see proof/tests/test_work_retention.py):
@@ -38,6 +59,7 @@ Which Dolt mechanism works for a server-mode database (proved on a disposable
      sql -r json -q "CALL DOLT_REMOTE('add', '--ref', REF, NAME, URL)"`
   - `... sql -q "CALL DOLT_PUSH(NAME, 'main')"`
   - `... sql -q "CALL DOLT_BACKUP('sync-url', 'file:///...')"`
+  - `... sql -q "CALL DOLT_GC()"` (`--full` collects the old generation too)
   - offline, for verification only: `dolt clone --ref REF URL DIR` and
     `dolt backup restore file:///... NAME` into a temporary directory.
 
@@ -74,6 +96,8 @@ DAILY_KEEP = 30
 MAX_REPLICATION_LAG = 300
 MAX_BACKUP_AGE = 90 * 60
 VERIFIED = "verified.json"
+DEFAULT_MAX_JOURNAL_BYTES = 512 * 1024 * 1024
+JOURNAL_FILE = "v" * 32
 TS_FORMAT = "%Y%m%dT%H%M%SZ"
 
 
@@ -180,6 +204,34 @@ class Ledger:
     def head(self):
         return str(self.cell("SELECT DOLT_HASHOF('main') AS h", "h"))
 
+    def commits(self):
+        return [str(r["commit_hash"]) for r in self.sql("SELECT commit_hash FROM dolt_log")]
+
+    def fingerprint(self):
+        """Every commit on main with the row counts reachable at it: issues,
+        dependencies, and the event and receipt issues the work helper writes."""
+        rows = []
+        for commit in self.commits():
+            quoted = sql_string(commit)
+            issues = self.count_as_of("SELECT COUNT(*) AS n FROM issues AS OF %s" % quoted)
+            dependencies = self.count_as_of("SELECT COUNT(*) AS n FROM dependencies AS OF %s" % quoted)
+            events = receipts = None
+            if issues is not None:
+                events = self.count_as_of("SELECT COUNT(*) AS n FROM issues AS OF %s WHERE id LIKE 'pw-event-%%'" % quoted)
+                receipts = self.count_as_of("SELECT COUNT(*) AS n FROM issues AS OF %s WHERE id LIKE 'pw-op-%%'" % quoted)
+            rows.append((commit, issues, dependencies, events, receipts))
+        return rows
+
+    def count_as_of(self, query):
+        """A count, or None at a commit before the table existed (the first
+        commits of a workspace precede bd's schema)."""
+        try:
+            return int(self.cell(query, "n"))
+        except Refused as error:
+            if "table not found" in str(error):
+                return None
+            raise
+
     def remotes(self):
         found = {}
         for row in self.sql("SELECT name, url, params FROM dolt_remotes"):
@@ -217,12 +269,42 @@ def offline_sql(directory, env, query, column, timeout=120):
     return rows[0][column]
 
 
+# --- storage ---------------------------------------------------------------------
+
+def storage_sizes(args, ws):
+    """Bytes under the database's noms directory: the journal file (what GC
+    reclaims), the old generation, and the whole directory."""
+    data_dir = Path(args.data_dir) if args.data_dir else Path(args.city) / ".beads" / "dolt"
+    noms = data_dir / ws.database / ".dolt" / "noms"
+    if not noms.is_dir():
+        raise Refused("data_dir_unreadable:%s" % noms)
+    journal = oldgen = total = 0
+    for path in noms.rglob("*"):
+        if not path.is_file():
+            continue
+        size = path.stat().st_size
+        total += size
+        if path.parent == noms and path.name == JOURNAL_FILE:
+            journal += size
+        elif "oldgen" in path.relative_to(noms).parts:
+            oldgen += size
+    return dict(journal_bytes=journal, oldgen_bytes=oldgen, noms_bytes=total, noms_dir=str(noms))
+
+
+def journal_collected(args, ws):
+    sizes = storage_sizes(args, ws)
+    if sizes["journal_bytes"] > args.max_journal_bytes:
+        raise Refused("ledger_not_collected:%d" % sizes["journal_bytes"])
+    return sizes
+
+
 # --- state file ----------------------------------------------------------------
 
 def empty_state():
     return {"schema": SCHEMA, "ok": False, "checked_at": None, "problems": ["doctor_never_ran"],
             "replication": {"pushed_revision": None, "pushed_at": None, "lag_seconds": None},
-            "backup": {"last_hourly_at": None, "last_daily_at": None, "hourly": 0, "daily": 0}}
+            "backup": {"last_hourly_at": None, "last_daily_at": None, "hourly": 0, "daily": 0},
+            "gc": {"last_at": None, "bytes_before": None, "bytes_after": None, "verified": False}}
 
 
 def state_path(city):
@@ -252,7 +334,7 @@ def read_state(city):
         return empty_state()
     state = empty_state()
     state.update(loaded)
-    for key in ("replication", "backup"):
+    for key in ("replication", "backup", "gc"):
         section = dict(empty_state()[key])
         section.update(loaded.get(key) or {})
         state[key] = section
@@ -271,6 +353,7 @@ def update_state(city, mutate):
     with state_lock(city):
         state = read_state(city)
         mutate(state)
+        state["ambient_overrides_stripped"] = ambient_overrides()
         write_state(city, state)
         return state
 
@@ -387,6 +470,15 @@ def cmd_backup(args):
     run_dir = hourly / stamp
     if run_dir.exists() or run_dir.with_name(stamp + ".unverified").exists():
         raise Refused("backup_target_exists:%s" % run_dir)
+    try:
+        sizes = journal_collected(args, ws)
+    except Refused as error:
+        def refused(state):
+            state["backup"]["last_error"] = str(error)
+            state["backup"]["last_attempt_at"] = iso(now)
+        update_state(args.city, refused)
+        raise
+    log("journal %d bytes (noms %d) within --max-journal-bytes %d" % (sizes["journal_bytes"], sizes["noms_bytes"], args.max_journal_bytes))
     run_dir.mkdir(parents=True)
     url = "file://" + str(run_dir / "dolt")
     try:
@@ -428,6 +520,39 @@ def cmd_backup(args):
         elif daily_runs:
             state["backup"].setdefault("last_daily_at", None)
     update_state(args.city, succeeded)
+
+
+# --- gc ---------------------------------------------------------------------------
+
+def cmd_gc(args):
+    ws = Workspace(args.workspace, args.host, args.port, args.user)
+    ledger = Ledger(ws, args.timeout)
+    now = utcnow(args)
+    outcome = dict(last_at=iso(now), verified=False, last_error=None)
+    try:
+        before = storage_sizes(args, ws)
+        outcome.update(bytes_before=before["noms_bytes"], journal_bytes_before=before["journal_bytes"])
+        fingerprint = ledger.fingerprint()
+        outcome["commits"] = len(fingerprint)
+        log("before GC: noms %d bytes, journal %d bytes, %d commits" % (before["noms_bytes"], before["journal_bytes"], len(fingerprint)))
+        call = "CALL DOLT_GC('--full')" if args.full else "CALL DOLT_GC()"
+        status = ledger.cell(call, "status", timeout=args.gc_timeout)
+        if str(status) != "0":
+            raise Refused("gc_failed:%s" % status)
+        after_fingerprint = ledger.fingerprint()
+        after = storage_sizes(args, ws)
+        outcome.update(bytes_after=after["noms_bytes"], journal_bytes_after=after["journal_bytes"])
+        log("after GC: noms %d bytes, journal %d bytes, %d commits" % (after["noms_bytes"], after["journal_bytes"], len(after_fingerprint)))
+        if after_fingerprint != fingerprint:
+            lost = [b for b in fingerprint if b not in after_fingerprint]
+            raise Refused("gc_history_changed:%s" % ", ".join(c for c, *_ in lost[:5]) if lost else "gc_history_changed:counts differ")
+        outcome["verified"] = True
+    except Refused as error:
+        outcome["last_error"] = str(error)
+        update_state(args.city, lambda state: state["gc"].update(outcome))
+        raise
+    update_state(args.city, lambda state: state["gc"].update(outcome))
+    log("verified: every commit hash and every AS OF row count unchanged")
 
 
 # --- doctor ---------------------------------------------------------------------
@@ -475,14 +600,14 @@ def doctor_checks(args, now):
     problems = []
     ws = None
     ledger = None
-    for name in ambient_overrides():
-        problems.append("ambient_override:%s" % name)
     try:
         ws = Workspace(args.workspace, args.host, args.port, args.user)
     except Refused as error:
         problems.append(str(error))
     database = ws.database if ws else PROJECT_DB
-    # (b) the workspace must keep its events journal.
+    # (b) the workspace must keep its events journal. Ambient BD_* overrides
+    # are stripped from every subprocess this script runs, so they are
+    # recorded, not counted.
     if ws and not ws.auto_prune_disabled():
         problems.append("workspace_auto_prune_not_false")
     # (a) the compactor only ever sees an explicit execution allowlist.
@@ -544,6 +669,15 @@ def doctor_checks(args, now):
                     problems.append("replication_remote_mismatch:%s" % args.remote_name)
         except Refused as error:
             problems.append(str(error))
+    # Storage: a journal over the threshold refuses backups until `gc` runs.
+    sizes = None
+    if ws:
+        try:
+            sizes = storage_sizes(args, ws)
+            if sizes["journal_bytes"] > args.max_journal_bytes:
+                problems.append("ledger_not_collected:%d" % sizes["journal_bytes"])
+        except Refused as error:
+            problems.append(str(error))
     # (e) off-host copies are fresh.
     state = read_state(args.city)
     lag = lag_of(state["replication"], now)
@@ -558,17 +692,20 @@ def doctor_checks(args, now):
         age = int((now - parse_time(last_backup)).total_seconds())
         if age > MAX_BACKUP_AGE:
             problems.append("backup_stale:%dm" % (age // 60))
-    return problems, lag
+    return problems, lag, sizes
 
 
 def cmd_doctor(args):
     now = utcnow(args)
-    problems, lag = doctor_checks(args, now)
+    problems, lag, sizes = doctor_checks(args, now)
     ok = not problems
 
     def record(state):
         state.update(ok=ok, checked_at=iso(now), problems=problems)
         state["replication"]["lag_seconds"] = lag
+        if sizes:
+            state["gc"].update(journal_bytes=sizes["journal_bytes"], noms_bytes=sizes["noms_bytes"],
+                               journal_measured_at=iso(now))
     state = update_state(args.city, record)
     print(json.dumps(state, indent=2, sort_keys=True))
     return 0 if ok else 1
@@ -582,6 +719,10 @@ def cmd_status(args):
         ledger = Ledger(ws, args.timeout)
         live = dict(database=ws.database, head=ledger.head(), remotes=ledger.remotes(),
                     issues=int(ledger.cell("SELECT COUNT(*) AS n FROM issues", "n")))
+        try:
+            live["storage"] = storage_sizes(args, ws)
+        except Refused as error:
+            live["storage"] = dict(error=str(error))
     except Refused as error:
         live = dict(error=str(error))
     print(json.dumps(dict(state=state, ledger=live, state_file=str(state_path(args.city))), indent=2, sort_keys=True))
@@ -604,6 +745,13 @@ def build_parser():
     parser.add_argument("--backup-root", default=os.environ.get("LISKOV_WORK_BACKUP_ROOT"),
                         help="directory holding hourly/ and daily/ (env LISKOV_WORK_BACKUP_ROOT)")
     parser.add_argument("--compactor-order", default=os.environ.get("LISKOV_WORK_COMPACTOR_ORDER") or DEFAULT_COMPACTOR_ORDER)
+    parser.add_argument("--data-dir", default=os.environ.get("LISKOV_WORK_DATA_DIR"),
+                        help="the sql-server data dir holding <database>/.dolt (env LISKOV_WORK_DATA_DIR, default <city>/.beads/dolt)")
+    parser.add_argument("--max-journal-bytes", type=int,
+                        default=int(os.environ.get("LISKOV_WORK_MAX_JOURNAL_BYTES") or DEFAULT_MAX_JOURNAL_BYTES),
+                        help="backup refuses and doctor reports ledger_not_collected above this journal size (default 512 MiB)")
+    parser.add_argument("--gc-timeout", type=int, default=1800, help="seconds for CALL DOLT_GC()")
+    parser.add_argument("--full", action="store_true", help="gc: CALL DOLT_GC('--full'), collecting the old generation too")
     parser.add_argument("--host", help="override the sql-server host from metadata.json")
     parser.add_argument("--port", type=int, help="override the sql-server port from metadata.json")
     parser.add_argument("--user", help="override the sql-server user (default root)")
@@ -611,7 +759,7 @@ def build_parser():
     parser.add_argument("--push-timeout", type=int, default=300)
     parser.add_argument("--backup-timeout", type=int, default=900)
     parser.add_argument("--now", help="fake UTC clock for qualification runs (ISO 8601)")
-    parser.add_argument("subcommand", choices=("replicate", "backup", "doctor", "status"))
+    parser.add_argument("subcommand", choices=("replicate", "backup", "doctor", "gc", "status"))
     return parser
 
 
@@ -621,12 +769,9 @@ def main(argv=None):
         print("work-maintenance: --workspace and --city are required (or LISKOV_WORK_WORKSPACE and GC_CITY_PATH)",
               file=sys.stderr)
         return 2
-    if args.subcommand != "doctor":
-        ambient = ambient_overrides()
-        if ambient:
-            print("work-maintenance: refusing to run with ambient routing override(s) %s set" % ", ".join(ambient),
-                  file=sys.stderr)
-            return 2
+    stripped = ambient_overrides()
+    if stripped:
+        log("stripping ambient routing override(s) from subprocesses: %s" % ", ".join(stripped))
     try:
         if args.subcommand == "replicate":
             cmd_replicate(args)
@@ -636,6 +781,9 @@ def main(argv=None):
             return 0
         if args.subcommand == "doctor":
             return cmd_doctor(args)
+        if args.subcommand == "gc":
+            cmd_gc(args)
+            return 0
         return cmd_status(args)
     except Refused as error:
         print("work-maintenance: %s: %s" % (args.subcommand, error), file=sys.stderr)

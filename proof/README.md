@@ -78,10 +78,12 @@ recoverable as ADR-0236 asks: `main` is pushed to the orchestrator git remote
 under `refs/dolt/liskov-work-beads` (code refs untouched), one verified
 full-history Dolt backup an hour is kept 24 times hourly and 30 times daily,
 and the doctor writes `<city>/proof/work-retention.json` for admission to
-read. The `work-retention` doctor check reports the same. The ledger is not a
+read; `gc` reclaims the noms journal through `CALL DOLT_GC()` and reports
+success only after proving every commit and every AS OF row count survived,
+and `backup` refuses while the journal is over 512 MiB. The `work-retention` doctor check reports the same. The ledger is not a
 rig, so these scripts address the sql-server with explicit `--workspace`
-arguments and refuse ambient `BEADS_*`/`BD_*` overrides; the reasons are in
-the script header. The operator's city.toml change, including the compactor
+arguments and strip ambient `BEADS_*`/`BD_*` overrides from their
+subprocesses, recording the names; the reasons are in the script header. The operator's city.toml change, including the compactor
 allowlist that keeps `gc dolt compact` off the ledger, is
 `docs/work-retention-install.md`.
 
