@@ -205,9 +205,13 @@ required; unknown fields are refused). The adapter calls
 `conversations.replies` (`channel`, `ts`, `oldest`=`latest`=`ts`,
 `inclusive`, `limit=1`, following the cursor), which returns a thread's
 parent first, so it selects the message whose `ts` equals the requested ts
-exactly. When Slack reports `thread_not_found` it falls back to
-`conversations.history` over the same inclusive one-ts window. It then
-fetches `chat.getPermalink`. Both use the `*:history` scopes the manifest
+exactly. It falls back to `conversations.history` over the same inclusive
+one-ts window when that walk finds no exact match — Slack answered
+`thread_not_found`, or the last page (no next cursor) passed without one.
+Any other `conversations.replies` error is returned as is, and a walk still
+holding a cursor after 10 pages is refused (`slack_error`, "replies
+pagination exceeded") rather than reported as not found. Only an exact-ts
+match is ever accepted. It then fetches `chat.getPermalink`. Both use the `*:history` scopes the manifest
 already requests; no new scope.
 
 Success (`200`):
@@ -230,13 +234,14 @@ Anything else is a typed refusal — a non-2xx status with
 | --- | --- | --- |
 | 400 | `bad_request` | Malformed JSON, unknown field, missing or invalid `channel`/`ts`. |
 | 404 | `message_not_found` | No message has exactly that ts in that channel. |
-| 422 | `bot_message` | `bot_id` set or subtype `bot_message`. |
+| 422 | `bot_message` | `bot_id`, `app_id` or `bot_profile` set, or subtype `bot_message`. |
 | 422 | `unsupported_subtype` | A system message (join, topic, tombstone…); only plain, `thread_broadcast` and `file_share` messages are a person's words. |
 | 422 | `no_author` | The message carries no `user`. |
 | 403 | `foreign_workspace` | The message's `team`/`user_team` is not `SLACK_WORKSPACE_ID` (the same workspace gate as inbound; an absent team passes). |
-| 502 | `slack_error` | Slack answered `ok: false`; its string is in `slack_error`. |
+| 502 | `slack_error` | Slack answered `ok: false` (its string is in `slack_error`), `chat.getPermalink` returned an empty permalink, or the replies walk exceeded its page bound. |
 | 429 | `rate_limited` | Slack returned HTTP 429; `retry_after` (seconds) and a `Retry-After` header carry Slack's value when it sent one. |
 | 502 | `slack_http_error` | Slack returned another non-2xx status. |
+| 502 | `slack_bad_response` | Slack answered 2xx with a body the adapter could not decode. |
 | 502 | `slack_unreachable` | The adapter could not reach Slack. |
 
 The adapter logs each verification and each refusal's code (never the

@@ -104,19 +104,22 @@ type slackReactionsAddResp struct {
 
 // slackStoredMessage is the subset of a message object returned by
 // conversations.replies / conversations.history that verify-message reads.
-// Edited is kept raw: its presence (Slack sets {"user","ts"} on an edited
-// message) is the whole signal.
+// Edited and BotProfile are kept raw: their presence (Slack sets
+// {"user","ts"} on an edited message, and a bot_profile object on anything an
+// app posted) is the whole signal.
 type slackStoredMessage struct {
-	Type     string          `json:"type,omitempty"`
-	Subtype  string          `json:"subtype,omitempty"`
-	User     string          `json:"user,omitempty"`
-	BotID    string          `json:"bot_id,omitempty"`
-	Team     string          `json:"team,omitempty"`
-	UserTeam string          `json:"user_team,omitempty"`
-	Text     string          `json:"text,omitempty"`
-	TS       string          `json:"ts,omitempty"`
-	ThreadTS string          `json:"thread_ts,omitempty"`
-	Edited   json.RawMessage `json:"edited,omitempty"`
+	Type       string          `json:"type,omitempty"`
+	Subtype    string          `json:"subtype,omitempty"`
+	User       string          `json:"user,omitempty"`
+	BotID      string          `json:"bot_id,omitempty"`
+	AppID      string          `json:"app_id,omitempty"`
+	BotProfile json.RawMessage `json:"bot_profile,omitempty"`
+	Team       string          `json:"team,omitempty"`
+	UserTeam   string          `json:"user_team,omitempty"`
+	Text       string          `json:"text,omitempty"`
+	TS         string          `json:"ts,omitempty"`
+	ThreadTS   string          `json:"thread_ts,omitempty"`
+	Edited     json.RawMessage `json:"edited,omitempty"`
 }
 
 // slackMessagesResp is the shared response shape of conversations.replies

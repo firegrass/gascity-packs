@@ -28,7 +28,7 @@ import (
 // verifyMaxPages bounds the conversations.replies pagination walk. The
 // oldest/latest window narrows the page set to the thread parent plus at
 // most the one requested reply, so more than a couple of pages means Slack
-// is not honouring the window; give up rather than walk a whole thread.
+// is not honouring the window; refuse rather than walk a whole thread.
 const verifyMaxPages = 10
 
 // Refusal codes returned in the "error" field of a verify-message refusal.
@@ -43,6 +43,7 @@ const (
 	verifyErrRateLimited      = "rate_limited"
 	verifyErrSlackHTTP        = "slack_http_error"
 	verifyErrSlackUnreachable = "slack_unreachable"
+	verifyErrSlackBadResponse = "slack_bad_response"
 )
 
 var (
@@ -113,7 +114,8 @@ func badVerifyRequest(detail string) *verifyRefusal {
 // slackRefusal maps a Slack transport or API failure for method into a
 // refusal. A 429 (or an ok:false "ratelimited") becomes rate_limited with
 // Retry-After surfaced; any other ok:false error passes Slack's string
-// through; anything else is a gateway failure.
+// through; an undecodable 2xx body is slack_bad_response; anything else is a
+// transport failure (slack_unreachable).
 func slackRefusal(method string, err error, apiError string) *verifyRefusal {
 	if err == nil {
 		if apiError == "ratelimited" {
@@ -139,6 +141,10 @@ func slackRefusal(method string, err error, apiError string) *verifyRefusal {
 		return &verifyRefusal{Status: http.StatusBadGateway, Code: verifyErrSlackHTTP,
 			Detail: fmt.Sprintf("%s: %v", method, err)}
 	}
+	if errors.Is(err, errSlackBadResponse) {
+		return &verifyRefusal{Status: http.StatusBadGateway, Code: verifyErrSlackBadResponse,
+			Detail: fmt.Sprintf("%s: %v", method, err)}
+	}
 	return &verifyRefusal{Status: http.StatusBadGateway, Code: verifyErrSlackUnreachable,
 		Detail: fmt.Sprintf("%s: %v", method, err)}
 }
@@ -153,10 +159,13 @@ func (s *server) handleVerifyMessage() http.HandlerFunc {
 			badVerifyRequest(fmt.Sprintf("decode: %v", err)).write(w)
 			return
 		}
-		res, refusal := s.verifyMessage(r.Context(), strings.TrimSpace(req.Channel), strings.TrimSpace(req.TS))
+		channel, ts := strings.TrimSpace(req.Channel), strings.TrimSpace(req.TS)
+		res, refusal := s.verifyMessage(r.Context(), channel, ts)
 		if refusal != nil {
-			log.Printf("verify-message: channel=%s ts=%s refused error=%s slack_error=%s detail=%s",
-				req.Channel, req.TS, refusal.Code, refusal.SlackError, refusal.Detail)
+			// %q throughout: channel/ts are caller input, and the detail can
+			// echo them, so a newline must not be able to forge a log line.
+			log.Printf("verify-message: channel=%q ts=%q refused error=%q slack_error=%q detail=%q",
+				channel, ts, refusal.Code, refusal.SlackError, refusal.Detail)
 			refusal.write(w)
 			return
 		}
@@ -184,7 +193,7 @@ func (s *server) verifyMessage(ctx context.Context, channel, ts string) (*verify
 	if refusal != nil {
 		return nil, refusal
 	}
-	if msg.BotID != "" || msg.Subtype == "bot_message" {
+	if msg.BotID != "" || msg.AppID != "" || rawPresent(msg.BotProfile) || msg.Subtype == "bot_message" {
 		return nil, &verifyRefusal{Status: http.StatusUnprocessableEntity, Code: verifyErrBotMessage,
 			Detail: "message was posted by a bot, not a person"}
 	}
@@ -214,6 +223,10 @@ func (s *server) verifyMessage(ctx context.Context, channel, ts string) (*verify
 	if !link.OK {
 		return nil, slackRefusal("chat.getPermalink", nil, link.Error)
 	}
+	if link.Permalink == "" {
+		return nil, &verifyRefusal{Status: http.StatusBadGateway, Code: verifyErrSlack,
+			Detail: "chat.getPermalink: empty permalink"}
+	}
 
 	threadTS := msg.ThreadTS
 	if threadTS == msg.TS {
@@ -227,18 +240,28 @@ func (s *server) verifyMessage(ctx context.Context, channel, ts string) (*verify
 		User:      msg.User,
 		Text:      msg.Text,
 		Permalink: link.Permalink,
-		Edited:    len(msg.Edited) > 0 && string(msg.Edited) != "null",
+		Edited:    rawPresent(msg.Edited),
 	}, nil
 }
 
-// findMessage locates the message whose ts equals ts exactly. It asks
+// rawPresent reports whether a raw JSON field was sent with a non-null value.
+func rawPresent(raw json.RawMessage) bool {
+	return len(raw) > 0 && string(raw) != "null"
+}
+
+// findMessage locates the message whose ts equals ts exactly. It walks
 // conversations.replies first — which finds both a thread reply and a
 // top-level message, but always returns the thread parent first, so the
-// match is by exact ts across pages — then falls back to
-// conversations.history over the inclusive [ts, ts] window when Slack
-// reports no thread for the ts.
+// match is by exact ts across pages. It falls back to conversations.history
+// over the inclusive [ts, ts] window when the walk finds no exact match:
+// either Slack answered thread_not_found, or the last page (no next cursor)
+// passed without one. Any other replies error is returned as-is, and a walk
+// still holding a cursor after verifyMaxPages pages is refused ("replies
+// pagination exceeded") rather than reported as not found. Only an exact-ts
+// match from either method is ever accepted.
 func (s *server) findMessage(ctx context.Context, channel, ts string) (*slackStoredMessage, *verifyRefusal) {
 	cursor := ""
+	walked := false // true once the replies walk ended without exhausting the page bound
 	for page := 0; page < verifyMaxPages; page++ {
 		params := url.Values{
 			"channel":   {channel},
@@ -257,6 +280,7 @@ func (s *server) findMessage(ctx context.Context, channel, ts string) (*slackSto
 		}
 		if !resp.OK {
 			if resp.Error == "thread_not_found" {
+				walked = true
 				break
 			}
 			return nil, slackRefusal("conversations.replies", nil, resp.Error)
@@ -266,8 +290,13 @@ func (s *server) findMessage(ctx context.Context, channel, ts string) (*slackSto
 		}
 		cursor = resp.ResponseMetadata.NextCursor
 		if cursor == "" {
+			walked = true
 			break
 		}
+	}
+	if !walked {
+		return nil, &verifyRefusal{Status: http.StatusBadGateway, Code: verifyErrSlack,
+			Detail: fmt.Sprintf("conversations.replies: replies pagination exceeded (%d pages)", verifyMaxPages)}
 	}
 
 	resp, err := slackGet[slackMessagesResp](ctx, s, "/conversations.history", url.Values{

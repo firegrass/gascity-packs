@@ -1,8 +1,8 @@
 Ask Slack who wrote one message, in which thread, with what text.
 
 The adapter reads the message back with its own bot token
-(`conversations.replies`, falling back to `conversations.history`, then
-`chat.getPermalink`), so the caller never holds the token. It exists for
+(`conversations.replies`, falling back to `conversations.history` when no
+exact-ts match is found there, then `chat.getPermalink`), so the caller never holds the token. It exists for
 answer provenance: a command that records a person's answer calls it first
 and records the result, rather than trusting text an agent relayed.
 
@@ -23,13 +23,15 @@ On success, prints the adapter's JSON:
 Refusals exit non-zero and print {"ok":false,"error":"<code>",...}:
   bad_request          malformed request (missing/invalid channel or ts)
   message_not_found    no message has exactly that ts in that channel
-  bot_message          the message was posted by a bot
+  bot_message          the message was posted by a bot or app
   unsupported_subtype  a system message, not one a person wrote
   no_author            the message carries no user id
   foreign_workspace    the author belongs to another Slack team
-  slack_error          Slack returned ok=false (its error in slack_error)
+  slack_error          Slack returned ok=false (its error in slack_error),
+                       an empty permalink, or too many reply pages
   rate_limited         Slack rate-limited the read (retry_after seconds)
   slack_http_error     Slack returned another non-2xx status
+  slack_bad_response   Slack's 2xx body could not be decoded
   slack_unreachable    the adapter could not reach Slack
 
 Example:

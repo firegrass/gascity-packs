@@ -1,10 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -65,12 +68,20 @@ func newFakeSlackReads(t *testing.T, s *server) *fakeSlackReads {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(status)
+		if raw, ok := body.(rawBody); ok {
+			_, _ = w.Write([]byte(raw))
+			return
+		}
 		_ = json.NewEncoder(w).Encode(body)
 	}))
 	t.Cleanup(f.srv.Close)
 	s.cfg.slackAPIBase = f.srv.URL
 	return f
 }
+
+// rawBody is written to the response verbatim instead of JSON-encoded, for
+// bodies that are not valid JSON.
+type rawBody string
 
 func (f *fakeSlackReads) callsTo(method string) []recordedCall {
 	f.mu.Lock()
@@ -390,5 +401,161 @@ func TestVerifyMessageOnlyOnInternalMux(t *testing.T) {
 	newInternalMux(srv).ServeHTTP(internal, httptest.NewRequest(http.MethodPost, "/verify-message", strings.NewReader(body)))
 	if internal.Code != http.StatusOK {
 		t.Fatalf("internal mux status = %d body=%s", internal.Code, internal.Body.String())
+	}
+}
+
+// --- review hardening (N1-N5) --------------------------------------------
+
+func TestVerifyMessageRefusesAppPostedMessageWithoutBotID(t *testing.T) {
+	cases := map[string]slackStoredMessage{
+		"app_id and bot_profile": {User: "UOWNER", Team: "T123", AppID: "A1",
+			BotProfile: json.RawMessage(`{"id":"B1","app_id":"A1","name":"crew"}`), Text: "x", TS: "1.000001"},
+		"app_id only":      {User: "UOWNER", AppID: "A1", Text: "x", TS: "1.000001"},
+		"bot_profile only": {User: "UOWNER", BotProfile: json.RawMessage(`{"id":"B1"}`), Text: "x", TS: "1.000001"},
+	}
+	for name, msg := range cases {
+		t.Run(name, func(t *testing.T) {
+			srv := newTestServer(t)
+			slack := newFakeSlackReads(t, srv)
+			slack.replies = func(url.Values) (int, map[string]string, any) { return okMessages("", msg) }
+			rec, out := verify(t, srv, `{"channel":"C1","ts":"1.000001"}`)
+			wantRefusal(t, rec, out, http.StatusUnprocessableEntity, verifyErrBotMessage)
+		})
+	}
+}
+
+func TestVerifyMessageRefusesEmptyPermalink(t *testing.T) {
+	srv := newTestServer(t)
+	slack := newFakeSlackReads(t, srv)
+	slack.replies = func(url.Values) (int, map[string]string, any) { return okMessages("", parent, reply) }
+	slack.permalink = func(url.Values) (int, map[string]string, any) {
+		return http.StatusOK, nil, slackPermalinkResp{OK: true, Channel: "C1"}
+	}
+	rec, out := verify(t, srv, `{"channel":"C1","ts":"1700000000.000500"}`)
+	wantRefusal(t, rec, out, http.StatusBadGateway, verifyErrSlack)
+	if d, _ := out["detail"].(string); !strings.Contains(d, "empty permalink") {
+		t.Errorf("detail = %q", d)
+	}
+}
+
+func TestVerifyMessageRepliesPageBound(t *testing.T) {
+	srv := newTestServer(t)
+	slack := newFakeSlackReads(t, srv)
+	// Every page returns only the parent and another cursor: the walk never
+	// ends, so it must be refused, not fall through to history or not-found.
+	slack.replies = func(url.Values) (int, map[string]string, any) { return okMessages("more", parent) }
+	rec, out := verify(t, srv, `{"channel":"C1","ts":"1700000000.000500"}`)
+	wantRefusal(t, rec, out, http.StatusBadGateway, verifyErrSlack)
+	if d, _ := out["detail"].(string); !strings.Contains(d, "replies pagination exceeded") {
+		t.Errorf("detail = %q", d)
+	}
+	if n := len(slack.callsTo("conversations.replies")); n != verifyMaxPages {
+		t.Errorf("replies calls = %d, want %d", n, verifyMaxPages)
+	}
+	if n := len(slack.callsTo("conversations.history")); n != 0 {
+		t.Errorf("history consulted after the page bound: %d calls", n)
+	}
+}
+
+func TestVerifyMessageHistoryFallbackAfterWalkWithoutMatch(t *testing.T) {
+	srv := newTestServer(t)
+	slack := newFakeSlackReads(t, srv)
+	top := slackStoredMessage{User: "UOWNER", Text: "yes", TS: "1700000000.000777"}
+	slack.replies = func(url.Values) (int, map[string]string, any) { return okMessages("", parent) }
+	slack.history = func(url.Values) (int, map[string]string, any) { return okMessages("", top) }
+	rec, out := verify(t, srv, `{"channel":"C1","ts":"1700000000.000777"}`)
+	if rec.Code != http.StatusOK || out["ts"] != "1700000000.000777" || out["user"] != "UOWNER" {
+		t.Fatalf("status=%d body=%v", rec.Code, out)
+	}
+}
+
+func TestVerifyMessageUndecodableSlackBody(t *testing.T) {
+	for name, setup := range map[string]func(*fakeSlackReads){
+		"replies": func(f *fakeSlackReads) {
+			f.replies = func(url.Values) (int, map[string]string, any) {
+				return http.StatusOK, nil, rawBody("<html>proxy</html>")
+			}
+		},
+		"permalink": func(f *fakeSlackReads) {
+			f.replies = func(url.Values) (int, map[string]string, any) { return okMessages("", parent, reply) }
+			f.permalink = func(url.Values) (int, map[string]string, any) { return http.StatusOK, nil, rawBody("{") }
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv := newTestServer(t)
+			setup(newFakeSlackReads(t, srv))
+			rec, out := verify(t, srv, `{"channel":"C1","ts":"1700000000.000500"}`)
+			wantRefusal(t, rec, out, http.StatusBadGateway, verifyErrSlackBadResponse)
+		})
+	}
+}
+
+func TestVerifyMessageAcceptsPersonSubtypes(t *testing.T) {
+	for _, subtype := range []string{"thread_broadcast", "file_share"} {
+		t.Run(subtype, func(t *testing.T) {
+			srv := newTestServer(t)
+			slack := newFakeSlackReads(t, srv)
+			msg := reply
+			msg.Subtype = subtype
+			slack.replies = func(url.Values) (int, map[string]string, any) { return okMessages("", parent, msg) }
+			rec, out := verify(t, srv, `{"channel":"C1","ts":"1700000000.000500"}`)
+			if rec.Code != http.StatusOK || out["user"] != "UOWNER" {
+				t.Fatalf("status=%d body=%v", rec.Code, out)
+			}
+		})
+	}
+}
+
+func TestVerifyMessageEditedNullIsNotEdited(t *testing.T) {
+	srv := newTestServer(t)
+	slack := newFakeSlackReads(t, srv)
+	slack.replies = func(url.Values) (int, map[string]string, any) {
+		return http.StatusOK, nil, rawBody(`{"ok":true,"messages":[{"type":"message","user":"UOWNER","text":"eu-west",` +
+			`"ts":"1700000000.000500","thread_ts":"1700000000.000100","edited":null}]}`)
+	}
+	rec, out := verify(t, srv, `{"channel":"C1","ts":"1700000000.000500"}`)
+	if rec.Code != http.StatusOK || out["edited"] != false {
+		t.Fatalf("status=%d body=%v", rec.Code, out)
+	}
+}
+
+func TestVerifyMessageRateLimitedVariants(t *testing.T) {
+	t.Run("ok false ratelimited at 200", func(t *testing.T) {
+		srv := newTestServer(t)
+		slack := newFakeSlackReads(t, srv)
+		slack.replies = func(url.Values) (int, map[string]string, any) { return slackErr("ratelimited") }
+		rec, out := verify(t, srv, `{"channel":"C1","ts":"1700000000.000500"}`)
+		wantRefusal(t, rec, out, http.StatusTooManyRequests, verifyErrRateLimited)
+	})
+	t.Run("429 without Retry-After", func(t *testing.T) {
+		srv := newTestServer(t)
+		slack := newFakeSlackReads(t, srv)
+		slack.replies = func(url.Values) (int, map[string]string, any) {
+			return http.StatusTooManyRequests, nil, slackMessagesResp{OK: false, Error: "ratelimited"}
+		}
+		rec, out := verify(t, srv, `{"channel":"C1","ts":"1700000000.000500"}`)
+		wantRefusal(t, rec, out, http.StatusTooManyRequests, verifyErrRateLimited)
+		if _, ok := out["retry_after"]; ok {
+			t.Errorf("retry_after present without a Slack Retry-After: %v", out["retry_after"])
+		}
+		if got := rec.Header().Get("Retry-After"); got != "" {
+			t.Errorf("Retry-After header = %q, want none", got)
+		}
+	})
+}
+
+func TestVerifyMessageRefusalLogCannotForgeALine(t *testing.T) {
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	srv := newTestServer(t)
+	newFakeSlackReads(t, srv)
+	rec, out := verify(t, srv, `{"channel":"C1\nverify-message: forged","ts":"1.000001"}`)
+	wantRefusal(t, rec, out, http.StatusBadRequest, verifyErrBadRequest)
+	if lines := strings.Count(strings.TrimRight(buf.String(), "\n"), "\n"); lines != 0 {
+		t.Fatalf("refusal log spans %d extra lines: %q", lines, buf.String())
+	}
+	if !strings.Contains(buf.String(), `channel="C1\nverify-message: forged"`) {
+		t.Errorf("channel not %%q-quoted in log: %q", buf.String())
 	}
 }

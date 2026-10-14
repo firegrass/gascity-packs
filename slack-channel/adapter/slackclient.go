@@ -4,12 +4,17 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"strings"
 )
+
+// errSlackBadResponse marks a 2xx Slack response whose body could not be
+// decoded: Slack was reached and answered, so it is not a transport failure.
+var errSlackBadResponse = errors.New("undecodable slack response")
 
 // slackHTTPError is a non-2xx HTTP status from the Slack web API. It keeps
 // the status and Retry-After header so a caller can tell a rate limit (429)
@@ -65,7 +70,7 @@ func slackDo[Resp any](s *server, httpReq *http.Request, method string) (*Resp, 
 	httpReq.Header.Set("Authorization", "Bearer "+s.cfg.botToken)
 	resp, err := s.httpClient.Do(httpReq)
 	if err != nil {
-		return nil, fmt.Errorf("post %s: %w", method, err)
+		return nil, fmt.Errorf("%s %s: %w", httpReq.Method, method, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	respBody, err := io.ReadAll(resp.Body)
@@ -81,7 +86,7 @@ func slackDo[Resp any](s *server, httpReq *http.Request, method string) (*Resp, 
 	}
 	var out Resp
 	if err := json.Unmarshal(respBody, &out); err != nil {
-		return nil, fmt.Errorf("decode slack response: %w", err)
+		return nil, fmt.Errorf("%w from %s: %v", errSlackBadResponse, method, err)
 	}
 	return &out, nil
 }
