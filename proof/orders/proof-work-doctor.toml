@@ -1,0 +1,12 @@
+# The retention checks of ADR-0236, every five minutes, written to
+# <city>/proof/work-retention.json for admission to read: the compactor
+# allowlist excludes the ledger, the journal is never auto-pruned, the ledger
+# is not a rig, no record is ephemeral or expiring, replication lag is under
+# five minutes and the last backup under ninety minutes old. A script.
+[order]
+description = "Check the PROOF work ledger's retention and write the state admission reads"
+trigger = "cooldown"
+interval = "5m"
+scope = "city"
+timeout = "5m"
+exec = "$PACK_DIR/assets/scripts/work_maintenance.py doctor"
