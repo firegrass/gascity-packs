@@ -1,8 +1,17 @@
-"""Canonical proof.contract.v1 compiler and verifier (ADR-0235).
+"""Canonical proof.contract.v1 / v2 compiler and verifier (ADR-0235, ADR-0236).
 
 Contracts are execution evidence, never a second task/claim owner. Every decision
 reads one freshly fetched docs revision; the base is provenance, not a global
 Git freshness test. Callers serialize admissions with admit.admission_lock.
+
+Under the Git work authority the record, its epic and its prerequisites are read
+from the docs revision and the contract is `proof.contract.v1`. Under the Beads
+authority (`work_authority.beads`) they come from the client snapshot — never a
+Markdown file — and the contract is `proof.contract.v2`: v1 plus a `work` object
+binding the ledger identity, revisions, lease and ledger revision. The verifier
+accepts both: a historical v1 run is re-compiled as v1 whatever the marker says,
+and a v2 run's volatile ledger fields (lease, operational and ledger revision)
+are not part of its identity check.
 """
 from __future__ import annotations
 
@@ -20,6 +29,11 @@ import uuid
 import admit
 
 SCHEMA = "proof.contract.v1"
+SCHEMA_V2 = "proof.contract.v2"
+SCHEMAS = {SCHEMA: "schemas/proof.contract.v1.json", SCHEMA_V2: "schemas/proof.contract.v2.json"}
+# Renewal, release and the ledger moving on change these without changing the
+# work; they are recorded, not reconciled.
+WORK_VOLATILE = ("lease_id", "operational_revision", "ledger_revision")
 PILOTS = {"liskov-agent-orchestrator", "liskov-rs"}
 VOLATILE = {"status", "claimed_by", "claimed_at", "claim_expires", "last_reviewed"}
 HEX = re.compile(r"^[0-9a-f]{64}$")
@@ -71,6 +85,17 @@ def parse(clone, text):
 
 
 def record(clone, revision, item):
+    """(path, frontmatter, body) of one work record: from the client snapshot
+    under the Beads authority, else from the docs revision in git."""
+    import work_authority as wa
+    if wa.beads(clone):
+        row = wa.row(clone, item)
+        if row is None:
+            raise admit.Refused("contract: expected one authoritative record for " + item)
+        if not isinstance(row.get("fields"), dict) or not isinstance(row.get("body"), str) \
+                or not isinstance(row.get("path"), str):
+            raise admit.Refused("contract: malformed ledger record for " + item)
+        return row["path"], row["fields"], row["body"]
     paths = git(clone, "ls-tree", "-r", "--name-only", revision, "docs").splitlines()
     matches = [p for p in paths if Path(p).name.startswith(item + "-") and p.endswith(".md")]
     if len(matches) != 1:
@@ -97,6 +122,29 @@ def claim_identity(item, fm, rig, instant=None):
             or expires <= instant or started > instant or expires <= started):
         raise admit.Refused("contract: claim is expired, replaced or no longer working")
     return {"packet": item, "owner": fm["claimed_by"], "claimed_at": started.isoformat()}
+
+
+def work_binding(clone, item, rig):
+    """The `work` object of a v2 contract: the ledger's identity, revisions and
+    the seat's live lease on `item`, read from the client snapshot."""
+    import proof_work_records as records
+    import work_authority as wa
+    row = wa.row(clone, item)
+    if row is None:
+        raise admit.Refused("contract: the ledger has no record for " + item)
+    lease = row.get("lease_id")
+    if (row.get("fields") or {}).get("claimed_by") != admit.SEAT_PREFIX + rig or not lease:
+        raise admit.Refused("contract: %s carries no live lease for %s%s in the ledger" % (item, admit.SEAT_PREFIX, rig))
+    state = wa.snapshot(clone)[0]
+    binding = {"bead_id": records.bead_id(item), "legacy_id": item, "epoch": str(state.get("epoch") or ""),
+               "authored_revision": row.get("authored_revision"),
+               "operational_revision": row.get("operational_revision"),
+               "semantic_digest": row.get("semantic_digest"), "lease_id": str(lease),
+               "ledger_revision": state.get("revision")}
+    if not binding["epoch"] or not HEX.fullmatch(str(binding["semantic_digest"] or "")) \
+            or any(type(binding[k]) is not int for k in ("authored_revision", "operational_revision", "ledger_revision")):
+        raise admit.Refused("contract: the ledger record for %s carries no usable revision identity" % item)
+    return binding
 
 
 def local_path(parent, reference):
@@ -126,8 +174,14 @@ def sources(clone, revision, path, fm):
         if authority.endswith(".md"):
             add(authority)
     if fm.get("parent_epic"):
-        epic_path, epic_fm, _ = record(clone, revision, fm["parent_epic"])
-        add(epic_path)
+        epic_path, epic_fm, epic_body = record(clone, revision, fm["parent_epic"])
+        import work_authority as wa
+        if wa.beads(clone):
+            # The epic is a work record: under the Beads authority its text is
+            # the ledger's, never a Markdown file that may no longer exist.
+            identities[epic_path] = digest({"fields": epic_fm, "body": epic_body})
+        else:
+            add(epic_path)
         for ref in epic_fm.get("reads") or []:
             target = local_path(epic_path, ref)
             if target is not None:
@@ -160,7 +214,19 @@ def recipe(pack, rig_config, review_policy):
     return digest({"files": files, "rig": rig_config, "review_policy": review_policy})
 
 
-def compile_contract(clone, revision, item, rig, repo, base, recipe_digest, landing, review, execution=None, rig_clone=None, rig_revision=None):
+def compile_contract(clone, revision, item, rig, repo, base, recipe_digest, landing, review, execution=None,
+                     rig_clone=None, rig_revision=None, schema=None):
+    """Compile the contract for `item`. `schema` pins the version — the
+    verifier re-compiles a historical run in its own version; admission leaves
+    it None and gets v2 under the Beads authority, v1 under Git."""
+    import work_authority as wa
+    native = wa.beads(clone)
+    if schema is None:
+        schema = SCHEMA_V2 if native else SCHEMA
+    if schema not in SCHEMAS:
+        raise admit.Refused("contract: unknown schema " + str(schema))
+    if schema == SCHEMA_V2 and not native:
+        raise admit.Refused("contract: a v2 contract needs the beads work authority")
     path, fm, body = record(clone, revision, item)
     if repo not in PILOTS or landing not in admit.LANDING or type(review) is not bool:
         raise admit.Refused("contract: unsupported repository or authorization")
@@ -176,27 +242,42 @@ def compile_contract(clone, revision, item, rig, repo, base, recipe_digest, land
         for source in authority_paths:
             if source.endswith(".md"):
                 relevant[repo + ":" + source] = digest(git(rig_clone, "show", rig_revision + ":" + source))
-    result = {"schema": SCHEMA, "packet": item, "rig": rig, "repository": repo,
+    result = {"schema": schema, "packet": item, "rig": rig, "repository": repo,
               "item_path": path, "task_digest": digest(semantic(fm, body)),
               "sources": relevant, "prerequisites": prerequisites,
               "scope": fm.get("write_scope"), "claim": identity, "execution": execution or {},
               "base": base, "docs_revision": revision, "recipe_digest": recipe_digest,
               "validation": fm.get("validation") or [], "acceptance": body,
               "publication": {"landing": landing, "review": review}}
+    if schema == SCHEMA_V2:
+        result["work"] = work_binding(clone, item, rig)
     result["id"] = digest(result)
     validate(result)
     return result
 
 
 def validate(contract):
-    schema = json.loads((Path(__file__).parent / "schemas/proof.contract.v1.json").read_text())
-    if not isinstance(contract, dict) or set(contract) != set(schema["required"]):
+    version = contract.get("schema") if isinstance(contract, dict) else None
+    if version not in SCHEMAS:
         raise admit.Refused("contract: malformed fields")
-    types = {"string": str, "object": dict, "array": list}
+    schema = json.loads((Path(__file__).parent / SCHEMAS[version]).read_text())
+    if set(contract) != set(schema["required"]):
+        raise admit.Refused("contract: malformed fields")
+    types = {"string": str, "object": dict, "array": list, "integer": int}
     for key, spec in schema["properties"].items():
         if type(contract[key]) is not types[spec["type"]]:
             raise admit.Refused("contract: malformed " + key)
-    if (contract["schema"] != SCHEMA or contract["repository"] not in PILOTS
+    if version == SCHEMA_V2:
+        work = contract["work"]
+        spec = schema["properties"]["work"]
+        if set(work) != set(spec["required"]) or any(
+                type(work[k]) is not types[spec["properties"][k]["type"]] for k in spec["required"]):
+            raise admit.Refused("contract: malformed work binding")
+        if (work["legacy_id"] != contract["packet"] or not HEX.fullmatch(work["semantic_digest"])
+                or not work["bead_id"] or not work["epoch"] or not work["lease_id"]
+                or work["authored_revision"] < 1 or work["operational_revision"] < 0):
+            raise admit.Refused("contract: invalid work binding")
+    if (contract["repository"] not in PILOTS
             or not admit.ID_RE.fullmatch(contract["packet"])
             or not all(HEX.fullmatch(contract[k]) for k in ("id", "task_digest", "recipe_digest"))
             or not all(re.fullmatch(r"[0-9a-f]{40}", contract[k]) for k in ("base", "docs_revision"))
@@ -219,8 +300,13 @@ def verify(contract, clone, revision, recipe_digest, landing=None, review=None, 
     current = compile_contract(clone, revision, contract["packet"], contract["rig"],
         contract["repository"], contract["base"], recipe_digest,
         publication["landing"] if landing is None else landing,
-        publication["review"] if review is None else review, contract["execution"], rig_clone, rig_revision)
-    changed = [k for k in contract if k not in ("id", "docs_revision") and contract[k] != current[k]]
+        publication["review"] if review is None else review, contract["execution"], rig_clone, rig_revision,
+        schema=contract["schema"])
+    changed = [k for k in contract if k not in ("id", "docs_revision", "work") and contract[k] != current[k]]
+    if "work" in contract:
+        stable = lambda w: {k: v for k, v in w.items() if k not in WORK_VOLATILE}  # noqa: E731
+        if stable(contract["work"]) != stable(current["work"]):
+            changed.append("work")
     if changed:
         raise admit.Refused("contract: reconciliation required: " + ", ".join(changed))
     return contract

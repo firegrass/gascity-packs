@@ -71,6 +71,7 @@ import sys
 from datetime import datetime, timedelta, timezone
 
 import factory_lib as fl
+import work_authority as wa
 from factory_lib import admit
 
 ME = "completer"
@@ -271,11 +272,13 @@ def renew_open(city, policy, backlog, waiting, dry_run, now=None):
     import docs_model as dm
     now = now or datetime.now(timezone.utc)
     admit.refresh_backlog_clone(backlog)
+    native = wa.beads(backlog)
+    if native:
+        wa.forget(backlog)
     candidates = []
     for rig, p, pr in waiting:
         seat = admit.SEAT_PREFIX + rig
-        files = glob.glob(os.path.join(backlog, "docs/backlog/items", p["id"] + "-*.md"))
-        fm = dm.split_frontmatter(open(files[0], encoding="utf-8").read())[0] if len(files) == 1 else None
+        fm = item_fields(backlog, p["id"])
         if not isinstance(fm, dict) or fm.get("claimed_by") != seat or fm.get("status") != "working":
             continue                                        # not ours to hold
         expires, opened = dm.parse_timestamp(fm.get("claim_expires")), dm.parse_timestamp(pr.get("createdAt"))
@@ -306,6 +309,10 @@ def renew_open(city, policy, backlog, waiting, dry_run, now=None):
             continue
         candidates.append((rig, p, pr, fm["claim_expires"]))
     if not candidates:
+        return
+    if native:
+        for rig, p, pr, was in candidates:
+            renew_lease(city, backlog, rig, p, policy["claim_hours"], "its pull request %s is open" % pr["url"])
         return
     try:
         with fl.backlog_write(city):
@@ -355,6 +362,56 @@ def live_unpublished(city, packet):
         return True
 
 
+def item_fields(backlog, item_id):
+    """The item's frontmatter, from its file under Git or the snapshot row under
+    Beads; None when it cannot be read."""
+    if wa.beads(backlog):
+        row = wa.row(backlog, item_id)
+        return dict(row["fields"]) if row and isinstance(row.get("fields"), dict) else None
+    import docs_model as dm
+    files = glob.glob(os.path.join(backlog, "docs/backlog/items", item_id + "-*.md"))
+    return dm.split_frontmatter(open(files[0], encoding="utf-8").read())[0] if len(files) == 1 else None
+
+
+def renew_lease(city, backlog, rig, packet, hours, why):
+    """Renew a factory seat's lease on `packet`'s item through the client
+    (Beads). A changed lease id is recorded back on the execution bead."""
+    seat = admit.SEAT_PREFIX + rig
+    lease = wa.lease_of(backlog, packet["id"], seat, packet["md"])
+    if not lease:
+        fl.log(ME, "could not renew %s: no lease for %s in the ledger" % (packet["id"], seat))
+        return False
+    try:
+        result = wa.client(backlog, "renew", item=packet["id"], by=seat, lease=lease, hours=hours)
+    except fl.Refused as exc:
+        fl.log(ME, "could not renew %s: %s" % (packet["id"], str(exc)[-200:]))
+        return False
+    wa.forget(backlog)
+    new_lease = str((result or {}).get("lease_id") or lease)
+    if new_lease != packet["md"].get(wa.LEASE_KEY):
+        fl.set_bead(city, rig, packet["bead"]["id"], **{wa.LEASE_KEY.replace(".", "__"): new_lease})
+        packet["md"][wa.LEASE_KEY] = new_lease
+    fl.log(ME, "renewed the lease of %s for %d hours in the work ledger: %s" % (packet["id"], hours, why))
+    return True
+
+
+def release_lease(backlog, rig, packet):
+    """Release a factory seat's lease through the client (Beads). Returns the
+    operation id of the release, or '' when it was refused."""
+    seat = admit.SEAT_PREFIX + rig
+    lease = wa.lease_of(backlog, packet["id"], seat, packet["md"])
+    if not lease:
+        fl.log(ME, "could not release %s: no lease for %s in the ledger" % (packet["id"], seat))
+        return ""
+    try:
+        result = wa.client(backlog, "release", item=packet["id"], by=seat, lease=lease)
+    except fl.Refused as exc:
+        fl.log(ME, "could not release %s: %s" % (packet["id"], str(exc)[-200:]))
+        return ""
+    wa.forget(backlog)
+    return str((result or {}).get("operation_id") or "released")
+
+
 def release_stopped(city, policy, rigs, backlog, dry_run):
     """Release, in one commit, the claim of every stopped packet that still holds one."""
     stopped = []
@@ -368,13 +425,14 @@ def release_stopped(city, policy, rigs, backlog, dry_run):
                     and not live_unpublished(city, p)]
     if not stopped:
         return
-    import docs_model as dm
     admit.refresh_backlog_clone(backlog)
+    native = wa.beads(backlog)
+    if native:
+        wa.forget(backlog)
     candidates = []
     for rig, p in stopped:
         seat = admit.SEAT_PREFIX + rig
-        files = glob.glob(os.path.join(backlog, "docs/backlog/items", p["id"] + "-*.md"))
-        fm = dm.split_frontmatter(open(files[0], encoding="utf-8").read())[0] if len(files) == 1 else None
+        fm = item_fields(backlog, p["id"])
         if not isinstance(fm, dict) or fm.get("claimed_by") != seat or fm.get("status") != "working":
             if not dry_run:                                  # already released, completed or re-claimed: theirs
                 fl.set_bead(city, rig, p["bead"]["id"], proof__released="not-ours")
@@ -389,6 +447,13 @@ def release_stopped(city, policy, rigs, backlog, dry_run):
         fl.log(ME, "would release the claims of stopped packets %s" % ", ".join(p["id"] for _, p in candidates))
         return
     reasons = {p["id"]: _reason(city, rig, p) for rig, p in candidates}
+    if native:
+        for rig, p in candidates:
+            receipt = release_lease(backlog, rig, p)
+            if receipt:
+                fl.set_bead(city, rig, p["bead"]["id"], proof__released=receipt)
+                fl.log(ME, "released %s for triage in the work ledger: %s (%s)" % (p["id"], p["state"], reasons[p["id"]]))
+        return
     try:
         with fl.backlog_write(city):
             released = []
@@ -462,6 +527,7 @@ def close_triaged(city, rigs, backlog, dry_run):
     it stops counting against `max_declined` / `max_failed`, which exist to catch
     a factory that is failing, not a backlog that has been sorted."""
     import docs_model as dm
+    native = wa.beads(backlog)
     for rig in sorted(rigs):
         try:
             admit.owned_clone(rigs, rig)
@@ -472,19 +538,28 @@ def close_triaged(city, rigs, backlog, dry_run):
             if p["state"] not in ("declined", "failed") or p["bead"].get("status") == "closed" \
                     or not md.get("proof.released") or not md.get("proof.claim_commit"):
                 continue
-            files = glob.glob(os.path.join(backlog, "docs/backlog/items", p["id"] + "-*.md"))
-            if len(files) != 1:
-                continue
-            rel = os.path.relpath(files[0], backlog)
-            given = fl.sh(["git", "-C", backlog, "show", "%s:%s" % (md["proof.claim_commit"], rel)])
-            today = open(files[0], encoding="utf-8").read()
-            fm = dm.split_frontmatter(today)[0]
-            if given.returncode != 0 or not isinstance(fm, dict) or fm.get("claimed_by"):
-                continue                                       # claimed again: the dispatcher's business
+            if native:
+                row = wa.row(backlog, p["id"])
+                fm = row.get("fields") if row else None
+                if not isinstance(fm, dict) or fm.get("claimed_by"):
+                    continue                                   # claimed again: the dispatcher's business
+                why = fl.triaged_row(md, row, fl.stop_reason(city, rig, p)) if fm.get("status") not in ("done", "superseded") else ""
+                edited = (row.get("semantic_digest") or "") != (md.get("proof.packet_digest") or "")
+            else:
+                files = glob.glob(os.path.join(backlog, "docs/backlog/items", p["id"] + "-*.md"))
+                if len(files) != 1:
+                    continue
+                rel = os.path.relpath(files[0], backlog)
+                given = fl.sh(["git", "-C", backlog, "show", "%s:%s" % (md["proof.claim_commit"], rel)])
+                today = open(files[0], encoding="utf-8").read()
+                fm = dm.split_frontmatter(today)[0]
+                if given.returncode != 0 or not isinstance(fm, dict) or fm.get("claimed_by"):
+                    continue                                   # claimed again: the dispatcher's business
+                why = fl.triaged(given.stdout, today, fl.stop_reason(city, rig, p)) if fm.get("status") not in ("done", "superseded") else ""
+                edited = fl.shaped(given.stdout) != fl.shaped(today)
             if fm.get("status") not in ("done", "superseded"):
-                why = fl.triaged(given.stdout, today, fl.stop_reason(city, rig, p))
                 if why:
-                    if fl.shaped(given.stdout) != fl.shaped(today) and not dry_run:
+                    if edited and not dry_run:
                         # Edited, but the decline is unanswered: say so once, and keep
                         # counting it. The dispatcher skips it for the same reason.
                         notify_once(city, rig, p, "unanswered", "PROOF packet edited but not triaged: %s" % p["id"],
@@ -680,6 +755,145 @@ def _reason(city, rig, packet):
     return fl.stop_reason(city, rig, packet) or "no reason recorded"
 
 
+def completion_evidence(city, rig, p, pr, sha):
+    """What the completer hands the checked completion command (ADR-0236): the
+    merged pull request, its merge commit, the green main head, the tree the
+    reviewer approved, and the attempt that produced it."""
+    root_md = (p.get("root") or {}).get("metadata") or {}
+    attempt = {"bead_id": p["bead"]["id"], "rig": rig}
+    if p.get("root", {}).get("id"):
+        attempt["root"] = p["root"]["id"]
+    if root_md.get("gc.outcome"):
+        attempt["outcome"] = root_md["gc.outcome"]
+    evidence = {"pull_request": pr["url"], "main_sha": sha, "attempts": [attempt]}
+    if (pr.get("mergeCommit") or {}).get("oid"):
+        evidence["merge_sha"] = pr["mergeCommit"]["oid"]
+    if root_md.get("proof.approved_tree"):
+        evidence["approved_tree"] = root_md["proof.approved_tree"]
+    return evidence
+
+
+def expected_digest(city, backlog, p):
+    """The semantic digest the completion must match: the one the contract the
+    attempt executed carried (a v2 run), else — a legacy run with no ledger
+    binding — the row's digest at admission, else its digest now."""
+    import execution_contract as ec
+    identity = p["md"].get("proof.contract_id")
+    if identity:
+        try:
+            work = ec.read(city, identity).get("work") or {}
+            if work.get("semantic_digest"):
+                return work["semantic_digest"]
+        except fl.Refused:
+            pass
+    if ec.HEX.fullmatch(str(p["md"].get("proof.packet_digest") or "")):
+        return p["md"]["proof.packet_digest"]
+    row = wa.row(backlog, p["id"])
+    return str((row or {}).get("semantic_digest") or "")
+
+
+def complete_in_ledger(city, policy, rigs, backlog, ready, dm, today):
+    """Complete each merged, green packet through the checked completion
+    command (Beads). The item's own state, the lease, the digest and the
+    epic's last-child rule are the helper's to judge; this side supplies the
+    evidence, catches the last-child refusal and holds that item for a person
+    exactly as the Git path does, and lands the ADR delivery bookkeeping as a
+    docs change — never a work record."""
+    wa.forget(backlog)
+    done, not_ours = [], []
+    for rig, p, pr, sha in ready:
+        seat = admit.SEAT_PREFIX + rig
+        fm = item_fields(backlog, p["id"])
+        if not isinstance(fm, dict) or fm.get("status") != "working" or fm.get("claimed_by") != seat:
+            fl.log(ME, "%s is not `working` for this seat in the work ledger; leaving the item alone" % p["id"])
+            not_ours.append((rig, p))
+            continue
+        lease = wa.lease_of(backlog, p["id"], seat, p["md"])
+        if not lease:
+            fl.log(ME, "%s: no lease for %s in the ledger; not completed" % (p["id"], seat))
+            continue
+        request = {"expected_semantic_digest": expected_digest(city, backlog, p), "resolution": "done",
+                   "evidence": completion_evidence(city, rig, p, pr, sha),
+                   "notes": "Completed by the PROOF completer: %s merged as %s, main green at %s"
+                            % (pr["url"], (pr.get("mergeCommit") or {}).get("oid", "?")[:10], sha[:10])}
+        try:
+            result = wa.client(backlog, "complete", item=p["id"], by=seat, lease=lease, request=request)
+        except fl.Refused as exc:
+            if wa.is_last_child_refusal(exc):
+                epic = fm.get("parent_epic") or "its epic"
+                notify_once(city, rig, p, "last-child", "PROOF packet merged; closing its epic needs you: %s" % p["id"],
+                            "packet  %s\nbead    %s (rig %s)\npr      %s\nmain    green at %s\n\n"
+                            "It is the last active item of %s. The work ledger refuses a factory seat that\n"
+                            "completion: whether an epic's completion criteria are met is a judgement, not a\n"
+                            "script's. Either complete the item with close_epic as a person, or file the epic's\n"
+                            "next item first — the completer then finishes this one.\n"
+                            "Until then the item stays `working` and its lease holds its write scope."
+                            % (p["id"], p["bead"]["id"], rig, pr["url"], sha[:10], epic))
+                fl.log(ME, "%s is the last active item of %s; held for a person" % (p["id"], epic))
+            else:
+                fl.log(ME, "%s: completion refused by the work ledger — %s" % (p["id"], str(exc)[-300:]))
+            continue
+        wa.forget(backlog)
+        done.append((rig, p, pr, sha, result or {}))
+    for rig, p in not_ours:
+        fl.set_bead(city, rig, p["bead"]["id"], proof__completed="not-ours")
+    if not done:
+        return 0
+    ids = [p["id"] for _, p, _, _, _ in done]
+    delivered = adrs_delivered(backlog, ids, dm, today)
+    if delivered:
+        try:
+            with fl.backlog_write(city):
+                landed = fl.land_backlog_change(
+                    backlog,
+                    "Record ADR delivery for %s\n\n"
+                    "Recorded by the PROOF completer (gascity/packs/proof/assets/scripts/completer.py) after the\n"
+                    "work ledger completed %s. A docs change, not a work record: the items themselves\n"
+                    "live in the ledger.\n%s\nRefs ADR-0236, %s."
+                    % (", ".join(ids), "it" if len(ids) == 1 else "them",
+                       "".join("%s: delivery none -> partial (delivered_by names %s)\n" % pair for pair in delivered),
+                       ", ".join(ids + ["ADR-" + number for number, _ in delivered])),
+                    policy["shared_checkout"])
+            fl.log(ME, "ADR delivery recorded on main as %s for %s" % (landed[:10], ", ".join(ids)))
+        except (fl.Refused, fl.BacklogBusy) as why:
+            fl.log(ME, "ADR delivery bookkeeping for %s did not land — %s; the next pass retries"
+                   % (", ".join(ids), why))
+    for rig, p, pr, sha, result in done:
+        receipt = str(result.get("operation_id") or result.get("ledger_revision") or "ledger")
+        fl.set_bead(city, rig, p["bead"]["id"], proof__completed=receipt,
+                    proof__merge_commit=(pr.get("mergeCommit") or {}).get("oid", ""), proof__main_green=sha)
+        tidy_packet(city, rigs, backlog, rig, p)
+        fl.log(ME, "%s done in the work ledger (operation %s); worktree and branch %s"
+               % (p["id"], receipt[:12], p["md"].get("proof.tidy", "see log")))
+    return 0
+
+
+def tidy_packet(city, rigs, backlog, rig, p):
+    """Remove a completed packet's merged worktree and branch; git refuses on
+    its own if anything in them is unmerged. Records the outcome on
+    `p["md"]["proof.tidy"]` for the log line."""
+    clone, work_dir, branch = admit.owned_clone(rigs, rig), p["md"].get("work_dir") or "", p["md"].get("proof.branch") or ""
+    tidy = "left in place"
+    if work_dir.startswith(os.path.join(clone, ".worktrees") + os.sep):
+        fl.sh(["git", "-C", clone, "fetch", "--quiet", "--prune", "origin"])
+        can_tidy = True
+        if os.path.realpath(clone) == os.path.realpath(backlog):
+            try:
+                with fl.backlog_write(city):
+                    fl.sh(["git", "-C", clone, "merge", "--quiet", "--ff-only", "origin/main"])
+            except fl.BacklogBusy:
+                can_tidy = False
+                tidy = "left in place (backlog writer busy)"
+        else:
+            fl.sh(["git", "-C", clone, "merge", "--quiet", "--ff-only", "origin/main"])
+        if can_tidy:
+            gone = fl.sh(["git", "-C", clone, "worktree", "remove", work_dir]).returncode == 0
+            gone = gone and fl.sh(["git", "-C", clone, "branch", "-d", branch]).returncode == 0
+            tidy = "removed" if gone else "left in place (git refused)"
+    p["md"]["proof.tidy"] = tidy
+    return tidy
+
+
 def main(argv):
     """Complete what has merged, then tidy — the tidy runs whichever way the
     completions returned, and never decides whether they succeeded."""
@@ -702,6 +916,11 @@ def complete(argv, city, dry_run):
     rigs = admit.load_rigs(city)
     backlog = admit.backlog_clone_of(rigs)
     sys.path.insert(0, os.path.join(backlog, "scripts"))
+    if wa.frozen(backlog):
+        # A write freeze on the work authority: nothing is completed, renewed
+        # or released this pass. Reads and the worktree tidy still run.
+        fl.log(ME, "pass skipped: %s" % wa.FREEZE_REASON)
+        return 0
     try:
         release_stopped(city, policy, rigs, backlog, dry_run)
         admit.refresh_backlog_clone(backlog)
@@ -792,6 +1011,8 @@ def complete(argv, city, dry_run):
     import docs_model as dm
     admit.refresh_backlog_clone(backlog)
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    if wa.beads(backlog):
+        return complete_in_ledger(city, policy, rigs, backlog, ready, dm, today)
 
     # Completing the LAST active item of an epic leaves an active epic with no
     # active child, which the docs validator refuses — and closing an epic is a

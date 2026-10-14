@@ -125,13 +125,28 @@ def semantic(text, dm):
 
 
 def claim(city, record, rigs):
+    """The packet's claim still belongs to this rig and the item is the one
+    admitted. Git: the file's semantic text against the admitted blob. Beads:
+    the snapshot row's semantic digest against the digest admission recorded,
+    and a live lease — no Markdown is read (ADR-0236)."""
+    import work_authority as wa
     backlog = admit.backlog_clone_of(rigs)
     with fl.backlog_write(city):
         admit.refresh_backlog_clone(backlog)
-        item_path, fm, body, dm = admit.load_item(backlog, record["packet"])
-        old = git(backlog, "show", record["packet_digest"])
-        if semantic(old, dm) != semantic(Path(item_path).read_text(), dm):
-            raise fl.Refused("packet or claim identity changed since admission")
+        if wa.beads(backlog):
+            wa.forget(backlog)
+            row = wa.row(backlog, record["packet"])
+            if row is None or row.get("semantic_digest") != record["packet_digest"]:
+                raise fl.Refused("packet or claim identity changed since admission")
+            fm = row.get("fields") or {}
+            item_path = str(Path(backlog) / row["path"])
+            if not row.get("lease_id"):
+                raise fl.Refused("packet claim expired")
+        else:
+            item_path, fm, body, dm = admit.load_item(backlog, record["packet"])
+            old = git(backlog, "show", record["packet_digest"])
+            if semantic(old, dm) != semantic(Path(item_path).read_text(), dm):
+                raise fl.Refused("packet or claim identity changed since admission")
         if fm.get("status") != "working" or fm.get("claimed_by") != admit.SEAT_PREFIX + record["rig"]:
             raise fl.Refused("packet no longer belongs to this rig")
         if admit.parse_ts(fm.get("claim_expires")) <= now():
