@@ -44,6 +44,8 @@ name = "proof-work-backup"
 [orders.overrides.env]
 LISKOV_WORK_WORKSPACE = "/home/<user>/projects/gascity/proof-work/.beads"
 LISKOV_WORK_BACKUP_ROOT = "/home/<user>/projects/gascity/proof-work-backups"
+# LISKOV_WORK_DATA_DIR defaults to <city>/.beads/dolt, the managed data dir;
+# LISKOV_WORK_MAX_JOURNAL_BYTES defaults to 536870912 (512 MiB).
 
 [[orders.overrides]]
 name = "proof-work-doctor"
@@ -66,7 +68,15 @@ Requirements on the host:
   identity of the user running `dolt sql-server`, and the push happens inside
   the server (`CALL DOLT_PUSH`), not in the order's shell;
 - the backup root is on local disk the server can write (`file://` backups are
-  written by the server process) and has room for 54 full copies.
+  written by the server process) and has room for 54 full copies;
+- the noms journal (`<data dir>/proof_work/.dolt/noms/vvvv…`) is under 512 MiB.
+  One shadow import left a 1.3 GB journal (per-row prolly-tree rewrites in one
+  transaction; the same corpus measured 253 MB on a disposable server).
+  `backup` refuses with `ledger_not_collected:<bytes>` and the doctor reports
+  it until `gc proof work-maintain gc` has run: it calls `DOLT_GC()` through
+  the server and reports success only after proving every commit hash and
+  every AS OF row count unchanged. Run it once after the import, before the
+  first backup, and whenever the doctor names `ledger_not_collected`.
 
 ## 3. What to expect on the remote
 
