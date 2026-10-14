@@ -16,7 +16,8 @@ permissions:
 jobs:
   analyze:
     name: Analyze (${{ matrix.language }})
-    runs-on: blacksmith-32vcpu-ubuntu-2404
+    # Forks do not inherit the upstream Blacksmith runner installation.
+    runs-on: ${{ github.repository == 'gastownhall/gascity-packs' && 'blacksmith-32vcpu-ubuntu-2404' || 'ubuntu-24.04' }}
     strategy:
       fail-fast: false
       matrix:
