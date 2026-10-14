@@ -111,8 +111,10 @@ client keeps its Markdown-on-main path byte for byte. Under `authority: beads`:
   attempt, catches the helper's last-active-child refusal and holds that item
   for a person as before, and lands ADR delivery bookkeeping as a docs change;
 - the keeper renews an expiring lease itself; the live-result publisher lands
-  its two documents, records the raw record through `evidence` and completes a
-  pass with the landing commit as its merge and main identity.
+  its two documents, completes a pass with the landing commit as its merge and
+  main identity, and only then records the raw record through `evidence` — an
+  evidence entry is part of the semantic digest a completion is bound to, so
+  it is appended after, never before.
 
 A marker carrying `freeze: true` (either authority) is a write freeze: the
 dispatcher admits and claims nothing, the completer completes and renews
