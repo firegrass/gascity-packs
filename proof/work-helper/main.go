@@ -39,9 +39,50 @@ type Receipt struct {
 func hash(value []byte) string          { h := sha256.Sum256(value); return hex.EncodeToString(h[:]) }
 func marshal(value any) ([]byte, error) { return json.Marshal(value) }
 
+// Read-only actions carry no operation identity and never write, so neither
+// an uncommitted-history reconciliation nor a receipt gates them.
+func readOnly(action string) bool {
+	return action == "snapshot" || action == "history" || action == "revision"
+}
+
+func durable(issue *beads.Issue) bool {
+	return !issue.Ephemeral && !issue.NoHistory && issue.CompactionLevel == 0 && (issue.StorageClass == "" || issue.StorageClass == "versioned")
+}
+
+// revision answers from the coordination bead alone: the browser polls it
+// every two seconds, so it never pays for a full snapshot or the evaluator.
+func revision(ctx context.Context, s beads.Storage, request Request) (json.RawMessage, error) {
+	issue, err := s.GetIssue(ctx, coordination)
+	if err != nil {
+		return nil, fmt.Errorf("missing or mismatched authority epoch: %w", err)
+	}
+	if issue == nil || !durable(issue) {
+		return nil, errors.New("missing or non-durable coordination bead")
+	}
+	var state struct {
+		Schema    string `json:"schema"`
+		Epoch     string `json:"epoch"`
+		Mode      string `json:"mode"`
+		Revision  int64  `json:"revision"`
+		SourceSHA any    `json:"source_sha"`
+	}
+	if err = json.Unmarshal(issue.Metadata, &state); err != nil {
+		return nil, err
+	}
+	epoch, _ := request["epoch"].(string)
+	if state.Schema != "proof.work.v1" || epoch == "" || state.Epoch != epoch {
+		return nil, errors.New("missing or mismatched authority epoch")
+	}
+	return marshal(map[string]any{"epoch": state.Epoch, "mode": state.Mode, "revision": state.Revision,
+		"source_sha": state.SourceSHA, "generated_at": time.Now().UTC().Truncate(time.Second).Format(time.RFC3339)})
+}
+
 func run(ctx context.Context, s beads.Storage, evaluator string, request Request) (json.RawMessage, error) {
 	action, _ := request["action"].(string)
-	readonly := action == "snapshot"
+	if action == "revision" {
+		return revision(ctx, s, request)
+	}
+	readonly := readOnly(action)
 	op, _ := request["operation_id"].(string)
 	if !readonly && (op == "" || len(op) > 128) {
 		return nil, errors.New("mutation requires operation_id of 1–128 bytes")
@@ -65,7 +106,7 @@ func run(ctx context.Context, s beads.Storage, evaluator string, request Request
 			state := map[string]any{}
 			edges := []*beads.Dependency{}
 			for _, issue := range issues {
-				if issue.Ephemeral || issue.NoHistory || issue.CompactionLevel != 0 || (issue.StorageClass != "" && issue.StorageClass != "versioned") {
+				if !durable(issue) {
 					return errors.New("non-durable record in project ledger")
 				}
 				existing[issue.ID] = issue
@@ -133,7 +174,7 @@ func run(ctx context.Context, s beads.Storage, evaluator string, request Request
 			}
 			creates := []*beads.Issue{}
 			for _, issue := range evaluated.Writes {
-				if issue.Ephemeral || issue.NoHistory || issue.CompactionLevel != 0 || (issue.StorageClass != "" && issue.StorageClass != "versioned") {
+				if !durable(issue) {
 					return errors.New("evaluator attempted ephemeral record")
 				}
 				if existing[issue.ID] == nil {
@@ -286,7 +327,8 @@ func mainRun(workspace, evaluator string) error {
 		_ = s.Close()
 		return errors.New("history inspection unavailable")
 	}
-	if request["action"] != "snapshot" {
+	action, _ := request["action"].(string)
+	if !readOnly(action) {
 		status, e := vc.Status(ctx)
 		if e != nil {
 			_ = s.Close()
@@ -298,7 +340,7 @@ func mainRun(workspace, evaluator string) error {
 		}
 	}
 	result, operationError := run(ctx, s, evaluator, request)
-	if operationError == nil && request["action"] != "snapshot" {
+	if operationError == nil && !readOnly(action) {
 		status, e := vc.Status(ctx)
 		if e != nil {
 			operationError = e

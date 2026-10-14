@@ -116,9 +116,14 @@ def main():
                 refused = run(argv[:-1] + ['/missing/evaluator.py'], project, helper_env, data=request, check=False)
                 if refused.returncode == 0:
                     raise RuntimeError('CLI accepted missing policy')
+                # revision is answered from the coordination bead without the evaluator.
+                revision = json.loads(run(argv[:-1] + ['/missing/evaluator.py'], project, helper_env,
+                                          data=json.dumps({'action': 'revision', 'epoch': 'test'})).stdout)
+                if revision['mode'] != 'shadow' or type(revision['revision']) is not int or revision['revision'] < 1 or not revision['generated_at']:
+                    raise RuntimeError('CLI revision answered wrongly: %r' % revision)
                 if json.loads(run(argv, project, helper_env, data=request).stdout)['records'] != baseline:
                     raise RuntimeError('CLI refusals changed records')
-                print('PASS checked executable routing, epoch and missing-policy refusals preserve records', flush=True)
+                print('PASS checked executable routing, epoch, missing-policy refusals and evaluator-free revision preserve records', flush=True)
                 # Negative control: native close does NOT know our acceptance policy.
                 created = run([binaries['bd'], 'create', 'Acceptance bypass control', '--json'], project, env)
                 issue = json.loads(created.stdout)
