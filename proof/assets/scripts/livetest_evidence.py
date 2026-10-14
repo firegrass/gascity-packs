@@ -650,7 +650,7 @@ def _ledger_effect(clone, evidence):
     if evidence.report != "pass":
         return "left_open", rel, None
     fm = row.get("fields") or {}
-    if fm.get("status") == "done" and any(evidence.raw_path.split("/")[-1] in str(e) for e in fm.get("evidence") or []):
+    if fm.get("status") == "done":
         return "closed", rel, None            # an earlier pass completed it; the receipt was lost
     if fm.get("status") != "working" or not str(fm.get("claimed_by") or "").startswith(SEAT_PREFIX) \
             or not row.get("lease_id"):
@@ -664,22 +664,55 @@ def _ledger_effect(clone, evidence):
 
 
 def _ledger_record(clone, evidence, commit, effect):
-    """After the documents landed as `commit`: record the raw evidence on the
-    item through the client, and — for a pass that is ours — complete it with
-    the landing commit as its merge and main identity. The helper's last-child
-    refusal holds the item for a person, as the Git path does; any other
-    refusal leaves it open and says why. Returns the item effect."""
+    """After the documents landed as `commit`: for a pass that is ours,
+    complete the item through the client with the landing commit as its merge
+    and main identity, THEN record the raw evidence entry on it. The order
+    matters: `fields.evidence` is part of the semantic digest the evaluator
+    binds a completion to, so an entry appended first would change the digest
+    the attempt was bound to and the completion would refuse for ever;
+    evidence may grow on a done item. The helper's last-child refusal holds the
+    item for a person, as the Git path does; any other refusal leaves it open
+    and says why. Returns the item effect."""
     seat_row = wa.row(clone, evidence.item_id, fresh=True)
     if seat_row is None or effect in ("missing",):
         return effect
     fm = seat_row.get("fields") or {}
-    if effect == "closed" and fm.get("status") == "done":
-        return "closed"                       # completed by an earlier pass whose receipt was lost
-    actor = fm.get("claimed_by") if str(fm.get("claimed_by") or "").startswith(SEAT_PREFIX) else ""
-    if not actor:
-        return "not_ours" if effect == "closed" else effect
-    entry = _rel(evidence.raw_path, seat_row["path"])
-    if entry not in (fm.get("evidence") or []):
+    holder = fm.get("claimed_by") if str(fm.get("claimed_by") or "").startswith(SEAT_PREFIX) else ""
+    if effect == "closed" and fm.get("status") == "working":
+        if not holder:
+            effect = "not_ours"
+        else:
+            lease = seat_row.get("lease_id") or ""
+            try:
+                wa.client(clone, "complete", item=evidence.item_id, by=holder, lease=str(lease), request={
+                    "expected_semantic_digest": seat_row.get("semantic_digest"), "resolution": "done",
+                    "evidence": {"merge_sha": commit, "main_sha": commit,
+                                 "attempts": [{"bead_id": evidence.run_id, "rig": holder[len(SEAT_PREFIX):],
+                                               "outcome": evidence.report}],
+                                 "acceptance": {"kind": EVIDENCE_KIND, "run_id": evidence.run_id,
+                                                "report": evidence.report, "evidence_digest": evidence.digest,
+                                                "raw": evidence.raw_path}},
+                    "notes": "Completed by the PROOF live-result publisher: run %s passed; evidence at %s"
+                             % (evidence.run_id, commit[:10])})
+                wa.forget(clone)
+            except fl.Refused as why:
+                wa.forget(clone)
+                if wa.is_last_child_refusal(why):
+                    effect = "held_last_child"
+                else:
+                    fl.log("completer", "live run %s: the work ledger refused the completion — %s; the item stays open"
+                           % (evidence.run_id, why))
+                    effect = "left_open"
+    elif effect == "closed" and fm.get("status") != "done":
+        effect = "not_ours"
+    # The raw record is evidence on the item whatever happened to it, as the
+    # Git path's `evidence:` entry is — appended after the completion, and
+    # only by a seat that holds or held the item (the actor the ledger knows).
+    actor = holder or SEAT_PREFIX + "completer"   # a done item has no holder; the publisher signs
+    current = wa.row(clone, evidence.item_id, fresh=True) or seat_row
+    entry = _rel(evidence.raw_path, current["path"])
+    if (current.get("fields") or {}).get("status") in ("working", "done") \
+            and entry not in ((current.get("fields") or {}).get("evidence") or []):
         try:
             wa.client(clone, "evidence", item=evidence.item_id, by=actor,
                       request={"entries": [entry], "receipts": {"kind": PUBLICATION_KIND, "run_id": evidence.run_id,
@@ -688,27 +721,7 @@ def _ledger_record(clone, evidence, commit, effect):
             wa.forget(clone)
         except fl.Refused as why:
             fl.log("completer", "live run %s: the work ledger refused the evidence entry — %s" % (evidence.run_id, why))
-    if effect != "closed" or fm.get("status") == "done":
-        return effect
-    lease = seat_row.get("lease_id") or ""
-    try:
-        wa.client(clone, "complete", item=evidence.item_id, by=actor, lease=str(lease), request={
-            "expected_semantic_digest": seat_row.get("semantic_digest"), "resolution": "done",
-            "evidence": {"merge_sha": commit, "main_sha": commit, "attempts": [{"bead_id": evidence.run_id, "rig": actor[len(SEAT_PREFIX):],
-                                                                             "outcome": evidence.report}],
-                         "acceptance": {"kind": EVIDENCE_KIND, "run_id": evidence.run_id, "report": evidence.report,
-                                        "evidence_digest": evidence.digest, "raw": evidence.raw_path}},
-            "notes": "Completed by the PROOF live-result publisher: run %s passed; evidence at %s"
-                     % (evidence.run_id, commit[:10])})
-    except fl.Refused as why:
-        wa.forget(clone)
-        if wa.is_last_child_refusal(why):
-            return "held_last_child"
-        fl.log("completer", "live run %s: the work ledger refused the completion — %s; the item stays open"
-               % (evidence.run_id, why))
-        return "left_open"
-    wa.forget(clone)
-    return "closed"
+    return effect
 
 
 def _item_effect(tree, evidence, dm, today):
