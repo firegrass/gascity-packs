@@ -61,7 +61,7 @@ def free_port():
 
 def clean_env():
     return {k: v for k, v in os.environ.items()
-            if not k.startswith(("BEADS_", "BD_", "GC_", "DOLT_", "PROOF_WORK_"))}
+            if not k.startswith(("BEADS_", "BD_", "GC_", "DOLT_", "LISKOV_WORK_"))}
 
 
 class DisposableServer:

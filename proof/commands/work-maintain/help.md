@@ -22,13 +22,13 @@ variable the city supplies through `[[orders.overrides]]` (see
 
 | Flag | Environment | Meaning |
 | --- | --- | --- |
-| `--workspace` | `PROOF_WORK_WORKSPACE` | the ledger's `.beads` directory; `metadata.json` must say `dolt_database: proof_work` (or `proof_test_*`) and names the server port |
+| `--workspace` | `LISKOV_WORK_WORKSPACE` | the ledger's `.beads` directory; `metadata.json` must say `dolt_database: proof_work` (or `proof_test_*`) and names the server port |
 | `--city` | `GC_CITY_PATH` | the city root (Gas City sets it for orders) |
-| `--remote` | `PROOF_WORK_REMOTE` | the orchestrator remote as a Dolt git URL, e.g. `git+ssh://git@github.com/proof-computer/liskov-agent-orchestrator.git` |
-| `--ref` | `PROOF_WORK_REF` | the git ref carrying the Dolt data; default `refs/dolt/liskov-work-beads` |
-| `--remote-name` | `PROOF_WORK_REMOTE_NAME` | the Dolt remote name inside the ledger; default `liskov-work` |
-| `--backup-root` | `PROOF_WORK_BACKUP_ROOT` | directory holding `hourly/` and `daily/` |
-| `--compactor-order` | `PROOF_WORK_COMPACTOR_ORDER` | the compactor order whose allowlist the doctor reads; default `mol-dog-compactor` |
+| `--remote` | `LISKOV_WORK_REMOTE` | the orchestrator remote as a Dolt git URL, e.g. `git+ssh://git@github.com/proof-computer/liskov-agent-orchestrator.git` |
+| `--ref` | `LISKOV_WORK_REF` | the git ref carrying the Dolt data; default `refs/dolt/liskov-work-beads` |
+| `--remote-name` | `LISKOV_WORK_REMOTE_NAME` | the Dolt remote name inside the ledger; default `liskov-work` |
+| `--backup-root` | `LISKOV_WORK_BACKUP_ROOT` | directory holding `hourly/` and `daily/` |
+| `--compactor-order` | `LISKOV_WORK_COMPACTOR_ORDER` | the compactor order whose allowlist the doctor reads; default `mol-dog-compactor` |
 
 `--host`, `--port`, `--user` override what `metadata.json` says (qualification
 only). `--now <ISO 8601>` is a fake clock for qualification runs.

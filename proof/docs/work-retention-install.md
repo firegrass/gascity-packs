@@ -35,23 +35,23 @@ is missing and (`compactor_allowlist_includes_project_database`) if
 [[orders.overrides]]
 name = "proof-work-replicate"
 [orders.overrides.env]
-PROOF_WORK_WORKSPACE = "/home/<user>/projects/gascity/proof-work/.beads"
-PROOF_WORK_REMOTE = "git+ssh://git@github.com/proof-computer/liskov-agent-orchestrator.git"
-PROOF_WORK_REF = "refs/dolt/liskov-work-beads"
+LISKOV_WORK_WORKSPACE = "/home/<user>/projects/gascity/proof-work/.beads"
+LISKOV_WORK_REMOTE = "git+ssh://git@github.com/proof-computer/liskov-agent-orchestrator.git"
+LISKOV_WORK_REF = "refs/dolt/liskov-work-beads"
 
 [[orders.overrides]]
 name = "proof-work-backup"
 [orders.overrides.env]
-PROOF_WORK_WORKSPACE = "/home/<user>/projects/gascity/proof-work/.beads"
-PROOF_WORK_BACKUP_ROOT = "/home/<user>/projects/gascity/proof-work-backups"
+LISKOV_WORK_WORKSPACE = "/home/<user>/projects/gascity/proof-work/.beads"
+LISKOV_WORK_BACKUP_ROOT = "/home/<user>/projects/gascity/proof-work-backups"
 
 [[orders.overrides]]
 name = "proof-work-doctor"
 [orders.overrides.env]
-PROOF_WORK_WORKSPACE = "/home/<user>/projects/gascity/proof-work/.beads"
-PROOF_WORK_REMOTE = "git+ssh://git@github.com/proof-computer/liskov-agent-orchestrator.git"
-PROOF_WORK_REF = "refs/dolt/liskov-work-beads"
-PROOF_WORK_BACKUP_ROOT = "/home/<user>/projects/gascity/proof-work-backups"
+LISKOV_WORK_WORKSPACE = "/home/<user>/projects/gascity/proof-work/.beads"
+LISKOV_WORK_REMOTE = "git+ssh://git@github.com/proof-computer/liskov-agent-orchestrator.git"
+LISKOV_WORK_REF = "refs/dolt/liskov-work-beads"
+LISKOV_WORK_BACKUP_ROOT = "/home/<user>/projects/gascity/proof-work-backups"
 ```
 
 `GC_CITY_PATH` is set by Gas City for every order. The `gc doctor` check

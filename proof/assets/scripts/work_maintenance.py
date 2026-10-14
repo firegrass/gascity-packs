@@ -289,7 +289,7 @@ def lag_of(replication, now):
 
 def replicate(args, ws, ledger, now):
     if not args.remote:
-        raise Refused("replicate: --remote (or PROOF_WORK_REMOTE) is required")
+        raise Refused("replicate: --remote (or LISKOV_WORK_REMOTE) is required")
     remotes = ledger.remotes()
     existing = remotes.get(args.remote_name)
     if existing is None:
@@ -377,7 +377,7 @@ def rotate(directory, keep):
 
 def cmd_backup(args):
     if not args.backup_root:
-        raise Refused("backup: --backup-root (or PROOF_WORK_BACKUP_ROOT) is required")
+        raise Refused("backup: --backup-root (or LISKOV_WORK_BACKUP_ROOT) is required")
     ws = Workspace(args.workspace, args.host, args.port, args.user)
     ledger = Ledger(ws, args.timeout)
     now = utcnow(args)
@@ -592,18 +592,18 @@ def cmd_status(args):
 
 def build_parser():
     parser = argparse.ArgumentParser(description="Retention and maintenance for the PROOF work ledger.")
-    parser.add_argument("--workspace", default=os.environ.get("PROOF_WORK_WORKSPACE"),
-                        help="the ledger's .beads directory (env PROOF_WORK_WORKSPACE)")
+    parser.add_argument("--workspace", default=os.environ.get("LISKOV_WORK_WORKSPACE"),
+                        help="the ledger's .beads directory (env LISKOV_WORK_WORKSPACE)")
     parser.add_argument("--city", default=os.environ.get("GC_CITY_PATH"),
                         help="city root; the state file is <city>/proof/work-retention.json (env GC_CITY_PATH)")
-    parser.add_argument("--remote", default=os.environ.get("PROOF_WORK_REMOTE"),
-                        help="git URL of the orchestrator remote, as a Dolt git+ URL (env PROOF_WORK_REMOTE)")
-    parser.add_argument("--ref", default=os.environ.get("PROOF_WORK_REF") or DEFAULT_REF,
-                        help="git ref carrying the Dolt data (env PROOF_WORK_REF, default %s)" % DEFAULT_REF)
-    parser.add_argument("--remote-name", default=os.environ.get("PROOF_WORK_REMOTE_NAME") or DEFAULT_REMOTE_NAME)
-    parser.add_argument("--backup-root", default=os.environ.get("PROOF_WORK_BACKUP_ROOT"),
-                        help="directory holding hourly/ and daily/ (env PROOF_WORK_BACKUP_ROOT)")
-    parser.add_argument("--compactor-order", default=os.environ.get("PROOF_WORK_COMPACTOR_ORDER") or DEFAULT_COMPACTOR_ORDER)
+    parser.add_argument("--remote", default=os.environ.get("LISKOV_WORK_REMOTE"),
+                        help="git URL of the orchestrator remote, as a Dolt git+ URL (env LISKOV_WORK_REMOTE)")
+    parser.add_argument("--ref", default=os.environ.get("LISKOV_WORK_REF") or DEFAULT_REF,
+                        help="git ref carrying the Dolt data (env LISKOV_WORK_REF, default %s)" % DEFAULT_REF)
+    parser.add_argument("--remote-name", default=os.environ.get("LISKOV_WORK_REMOTE_NAME") or DEFAULT_REMOTE_NAME)
+    parser.add_argument("--backup-root", default=os.environ.get("LISKOV_WORK_BACKUP_ROOT"),
+                        help="directory holding hourly/ and daily/ (env LISKOV_WORK_BACKUP_ROOT)")
+    parser.add_argument("--compactor-order", default=os.environ.get("LISKOV_WORK_COMPACTOR_ORDER") or DEFAULT_COMPACTOR_ORDER)
     parser.add_argument("--host", help="override the sql-server host from metadata.json")
     parser.add_argument("--port", type=int, help="override the sql-server port from metadata.json")
     parser.add_argument("--user", help="override the sql-server user (default root)")
@@ -618,7 +618,7 @@ def build_parser():
 def main(argv=None):
     args = build_parser().parse_args(argv)
     if not args.workspace or not args.city:
-        print("work-maintenance: --workspace and --city are required (or PROOF_WORK_WORKSPACE and GC_CITY_PATH)",
+        print("work-maintenance: --workspace and --city are required (or LISKOV_WORK_WORKSPACE and GC_CITY_PATH)",
               file=sys.stderr)
         return 2
     if args.subcommand != "doctor":
