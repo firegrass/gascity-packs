@@ -282,6 +282,7 @@ def test_shipped_pack_assets_route_beads_commands_through_gc() -> None:
         # Do not route that negative control through an execution city.
         if path.relative_to(REPO_ROOT) in {
             Path("proof/tests/run_native.py"),
+            Path("proof/tests/test_work_retention.py"),
             Path("proof/work-helper/checked_test.go"),
         }:
             continue
