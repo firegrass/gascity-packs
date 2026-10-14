@@ -23,18 +23,51 @@ cd proof/work-helper
 go build -mod=readonly -o /path/to/proof-work .
 ```
 
-This candidate supports committed import, snapshot, claim, renewal, release and
-revision-checked edits on an explicit shadow workspace. Work, operation receipts
-and full revision events are native durable versioned Beads records. All writes
-touch a coordination bead and re-evaluate policy after serialization conflicts.
-Creation dates and legacy resolution are preserved. Import emits no PROOF
-creation/completion events and applies no classification hold.
+The helper reads one JSON request on stdin and prints one JSON result; any
+refusal exits 1 with the reason on stderr and commits nothing. Work, operation
+receipts and full revision events are native durable versioned Beads records.
+All writes touch a coordination bead and re-evaluate policy after serialization
+conflicts. Creation dates and legacy resolution are preserved. Import emits no
+PROOF creation/completion events and applies no classification hold.
 
-Live mutation is deliberately refused. Authoring, acceptance/evidence/completion,
-v2 execution bindings, production client migration, retention/backup automation,
-authority switching and rollback are not installed by this foundation. A native
-receipt observed after an uncertain commit is not an off-host durability promise.
-Uncommitted Dolt history refuses mutation and receipt replay pending reconciliation.
+Read-only actions (no `operation_id`, no `actor`):
+
+- `snapshot` — the state, every record and the computed frontier.
+- `revision` — `{epoch, mode, revision, source_sha, generated_at}`, answered by
+  the helper from the coordination bead without running the evaluator.
+- `history {id}` — the record's immutable events, ordered by `at` then
+  `operation_id` (each also carries `ledger_revision`), and its receipts.
+
+Mutations carry `epoch`, `operation_id` and `actor`; `gascity/<rig>` is a
+factory seat, any other actor is a person. `shadow` and `live` accept
+mutations, `frozen` refuses every one:
+
+- `import`, `claim`, `renew`, `release`, `edit` — as before: readiness, scope
+  overlap, epic capacity, lease generations and authored revisions.
+- `author` — a new open backlog item, epic or question under its legacy root
+  (`record`, or `records` to author an epic with its first item atomically).
+- `answer` — a question only; sets `answered`, moves the path to
+  `docs/questions/answered/` and replaces the body.
+- `evidence` — appends deduplicated entries to a working or done item, with
+  the caller's receipts kept verbatim on the event.
+- `complete` — from `working` by the lease holder, bound to the semantic
+  digest the attempt executed. A factory seat needs a merged pull request (or
+  merge sha) and a green main sha; a person may complete on acceptance alone
+  and is the only actor that may supersede. The last active child of an epic
+  needs a person's `close_epic: true`, which closes the epic in the same
+  operation; a factory seat can never close an epic. The completion event
+  retains the full completed row and evidence and is never overwritten.
+- `reopen` — person only; done or superseded back to open (a closed parent
+  epic reopens with it). Earlier completion events stay.
+- `activate` — `shadow` to `live`, only with reconciled reservations and the
+  expected source revision. `freeze` — `live` to `frozen`; thawing is a new
+  epoch via a fresh import.
+
+Not installed by this candidate: v2 execution bindings, production client
+migration, retention/backup automation and the authority marker switch. A
+native receipt observed after an uncertain commit is not an off-host
+durability promise. Uncommitted Dolt history refuses mutation and receipt
+replay pending reconciliation.
 
 ## Tests
 
@@ -49,7 +82,9 @@ python3 proof/assets/scripts/check_entrypoints.py proof
 Native qualification requires bd 1.3.1, Dolt 2.3.5, Go and ICU. It starts a
 disposable server and never opens a live city. The original seven Go transaction
 checks and two CLI controls are retained; checked-command tests additionally
-exercise the canonical Python policy and same-seat replacement leases.
+exercise the canonical Python policy, same-seat replacement leases, and the
+full completion, authoring, mode-transition and history flow in one isolated
+database.
 
 These are rehearsal tests, not authority-switch or retention qualification.
 Private-corpus import and compatibility tests remain in the orchestrator.
