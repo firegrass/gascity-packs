@@ -251,8 +251,8 @@ def main():
         print("REFUSE - no trusted target descriptor for the requested target.")
         print("A live test runs only against a target this orchestrator carries in "
               "checked-in code, because the app id, the cleanup margin and the "
-              "permitted commands are not things a packet may supply. Known: %s"
-              % (", ".join(sorted(TRUSTED_TARGETS)) or "(none)"))
+              "permitted commands are not things a packet may supply. "
+              "Check the trusted target catalog.")
         return 2
     if args.max_exercise_seconds <= 0:
         print("REFUSE - --max-exercise-seconds must be positive.")
