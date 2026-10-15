@@ -5,6 +5,7 @@ database that is deliberately not a rig (ADR-0236). Four subcommands, every
 one a script:
 
     gc proof work-maintain replicate   push main to the orchestrator git remote under a custom Dolt ref
+        --force --reason <why>         replace the remote ref's history; only after a cutover reset
     gc proof work-maintain backup      one verified full-history copy into <backup-root>/hourly/<UTC ts>/
     gc proof work-maintain doctor      the retention checks; ok=false with named problems otherwise
     gc proof work-maintain gc          CALL DOLT_GC() through the server, a success only when every

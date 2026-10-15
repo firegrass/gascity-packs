@@ -385,7 +385,14 @@ def replicate(args, ws, ledger, now):
         raise Refused("replication_remote_mismatch:%s is %s ref %s, expected %s ref %s"
                       % (args.remote_name, existing["url"], existing["ref"], args.remote, args.ref))
     head_before = ledger.head()
-    rows = ledger.sql("CALL DOLT_PUSH(%s, 'main')" % sql_string(args.remote_name), timeout=args.push_timeout)
+    if args.force:
+        if not args.reason:
+            raise Refused("replicate: --force requires --reason (why the remote's history is replaced)")
+        log("FORCE push: the remote ref %s will be replaced; reason: %s" % (args.ref, args.reason))
+        push = "CALL DOLT_PUSH('--force', %s, 'main')" % sql_string(args.remote_name)
+    else:
+        push = "CALL DOLT_PUSH(%s, 'main')" % sql_string(args.remote_name)
+    rows = ledger.sql(push, timeout=args.push_timeout)
     if not rows or str(rows[0].get("status")) != "0":
         raise Refused("replication_push_failed:%s" % ((rows or [{}])[0].get("message") or "no status"))
     tracked = ledger.sql("SELECT hash FROM dolt_remote_branches WHERE name = %s"
@@ -417,6 +424,8 @@ def cmd_replicate(args):
     def succeeded(state):
         state["replication"].update(pushed_revision=pushed, pushed_at=iso(now), lag_seconds=0,
                                     last_attempt_at=iso(now), last_error=None)
+        if args.force:
+            state["replication"].update(forced_at=iso(now), forced_reason=args.reason)
     update_state(args.city, succeeded)
 
 
@@ -757,6 +766,10 @@ def build_parser():
     parser.add_argument("--user", help="override the sql-server user (default root)")
     parser.add_argument("--timeout", type=int, default=120, help="seconds per SQL statement")
     parser.add_argument("--push-timeout", type=int, default=300)
+    parser.add_argument("--force", action="store_true",
+                        help="replicate: CALL DOLT_PUSH('--force'), replacing the remote ref's history; "
+                             "needed once after the ledger is re-initialised (a cutover reset), never by an order")
+    parser.add_argument("--reason", help="replicate --force: recorded as forced_reason in the state file")
     parser.add_argument("--backup-timeout", type=int, default=900)
     parser.add_argument("--now", help="fake UTC clock for qualification runs (ISO 8601)")
     parser.add_argument("subcommand", choices=("replicate", "backup", "doctor", "gc", "status"))
