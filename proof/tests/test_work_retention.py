@@ -15,7 +15,11 @@ temporary directory and stops it. Four groups, as ADR-0236 asks:
   (c) hourly backups across UTC day boundaries under a fake clock keep 24
       hourly and 30 daily copies, every one restorable, and never delete a
       copy that is not verified;
-  (d) each doctor failure condition produces its named problem and ok=false.
+  (d) each doctor failure condition produces its named problem and ok=false,
+      and ambient BD_*/BEADS_* variables are stripped and recorded, not refused;
+  (e) storage GC through the server keeps every commit, every row at every
+      commit, the event and receipt issues and a later clone intact while the
+      journal shrinks, and a journal over the threshold refuses backups.
 
 Requires bd 1.3.1, Dolt 2.3.5 and git; (a) also needs a Gas City checkout
 (GASCITY_CHECKOUT, or a sibling `gascity` directory) for the compactor.
@@ -131,8 +135,8 @@ class DisposableServer:
             raise RuntimeError("bd %s: %s%s" % (" ".join(args), result.stdout, result.stderr))
         return result.stdout
 
-    def create_issue(self, workspace, title):
-        created = json.loads(self.bd(workspace, "create", title, "--json"))
+    def create_issue(self, workspace, title, *extra):
+        created = json.loads(self.bd(workspace, "create", title, "--json", *extra))
         created = created[0] if isinstance(created, list) else created
         return created["id"]
 
@@ -161,6 +165,16 @@ class DisposableServer:
 
     def rows(self, database):
         return list(csv.reader(io.StringIO(self.sql(database, "SELECT * FROM issues ORDER BY id", fmt="csv"))))
+
+    def rows_as_of(self, database, table, commit):
+        order = "id" if table == "issues" else "1, 2, 3"
+        try:
+            text = self.sql(database, "SELECT * FROM %s AS OF '%s' ORDER BY %s" % (table, commit, order), fmt="csv")
+        except RuntimeError as error:
+            if "table not found" in str(error):
+                return None     # a commit before bd created the table
+            raise
+        return list(csv.reader(io.StringIO(text)))
 
 
 def offline_rows(directory, env, query="SELECT * FROM issues ORDER BY id"):
@@ -216,7 +230,8 @@ class ServerCase(unittest.TestCase):
         cls.server = DisposableServer()
         cls.city = cls.server.base / "city"
         (cls.city / "proof").mkdir(parents=True)
-        cls.env = dict(cls.server.env, PATH=str(stub_gc(cls.server.base / "stub-bin")) + os.pathsep + cls.server.env["PATH"])
+        cls.env = dict(cls.server.env, PATH=str(stub_gc(cls.server.base / "stub-bin")) + os.pathsep + cls.server.env["PATH"],
+                       LISKOV_WORK_DATA_DIR=str(cls.server.data_dir))
 
     @classmethod
     def tearDownClass(cls):
@@ -352,10 +367,15 @@ class Replication(ServerCase):
         self.assertIn("replication_remote_mismatch", state_of(city)["replication"]["last_error"])
         self.assertEqual(state_of(city)["replication"]["pushed_revision"], before["pushed_revision"])
 
-    def test_refuses_ambient_routing_override(self):
-        result = maintenance(self.server, self.workspace, self.city, "replicate", "--remote", self.url,
-                             env=dict(self.env, BEADS_DIR="/wrong"), expect=2)
-        self.assertIn("ambient", result.stderr)
+    def test_strips_ambient_routing_override(self):
+        """The city's controller sets BD_* for every exec order; they are
+        stripped from the dolt/bd subprocesses and recorded, never refused."""
+        result = maintenance(self.server, self.workspace, self.city, "replicate", "--remote", self.url, "--ref", REF,
+                             env=dict(self.env, BEADS_DIR="/wrong", BD_BIN="/wrong/bd"))
+        self.assertIn("stripping ambient routing override(s)", result.stdout)
+        state = state_of(self.city)
+        self.assertEqual(state["ambient_overrides_stripped"], ["BD_BIN", "BEADS_DIR"])
+        self.assertEqual(state["replication"]["pushed_revision"], self.server.head("proof_test_repl"))
 
 
 class BackupRotation(ServerCase):
@@ -494,7 +514,9 @@ class Doctor(ServerCase):
         finally:
             config.write_text(original)
         state = self.doctor(env=dict(self.env, BD_EVENTS_JOURNAL_AUTO_PRUNE="true"))
-        self.assertProblem(state, "ambient_override:BD_EVENTS_JOURNAL_AUTO_PRUNE")
+        self.assertTrue(state["ok"], state["problems"])
+        self.assertEqual(state["ambient_overrides_stripped"], ["BD_EVENTS_JOURNAL_AUTO_PRUNE"])
+        self.assertEqual(self.doctor()["ambient_overrides_stripped"], [])
 
     def test_registered_as_rig(self):
         write_city_toml(self.city, rigs=[(self.db, "pdx", "/nowhere")])
@@ -565,6 +587,86 @@ class Doctor(ServerCase):
         self.assertTrue(doc["state"]["ok"])
         self.assertEqual(doc["ledger"]["database"], self.db)
         self.assertIn("liskov-work", doc["ledger"]["remotes"])
+
+
+class GarbageCollection(ServerCase):
+    """(e) DOLT_GC through the server, proven history-preserving."""
+
+    def snapshot(self, db, commits):
+        """Rows of issues and dependencies AS OF every commit, independently of the script."""
+        return {commit: (self.server.rows_as_of(db, "issues", commit), self.server.rows_as_of(db, "dependencies", commit))
+                for commit in commits}
+
+    def test_gc_preserves_history_and_shrinks_the_journal(self):
+        server, city, db = self.server, self.city, "proof_test_gc"
+        ws = server.workspace("gc-project", db)
+        ids = server.seed(ws, 12)
+        for i in range(1, 4):
+            for ident in ids:
+                server.bd(ws, "update", ident, "--set-metadata", "bloat%d=%s" % (i, "x" * 2000))
+        for left, right in zip(ids, ids[1:]):
+            server.bd(ws, "dep", "add", left, right)
+        for name in ("pw-event-a1b2-0", "pw-event-a1b2-1", "pw-op-a1b2"):
+            server.create_issue(ws, name, "--id", name, "--force")
+        noms = server.data_dir / db / ".dolt" / "noms"
+        journal_before = (noms / ("v" * 32)).stat().st_size
+        self.assertGreater(journal_before, 1_000_000, "the seed must bloat the journal")
+        commits = server.commits(db)
+        self.assertGreater(len(commits), 60)
+        before = self.snapshot(db, commits)
+        self.assertEqual(len(before[commits[0]][1]) - 1, len(ids) - 1, "dependency rows are present at head")
+        # A journal over the threshold refuses backups and is reported by the doctor.
+        root = server.base / "gc-backups"
+        result = maintenance(server, ws, city, "backup", "--backup-root", str(root), "--max-journal-bytes", "1", env=self.env, expect=1)
+        self.assertIn("ledger_not_collected:%d" % journal_before, result.stderr)
+        self.assertFalse((root / "hourly").exists())
+        self.assertIn("ledger_not_collected", state_of(city)["backup"]["last_error"])
+        write_city_toml(city)
+        maintenance(server, ws, city, "doctor", "--max-journal-bytes", "1", env=self.env, expect=1)
+        state = state_of(city)
+        self.assertIn("ledger_not_collected:%d" % journal_before, state["problems"])
+        self.assertEqual(state["gc"]["journal_bytes"], journal_before)
+        # GC itself.
+        maintenance(server, ws, city, "gc", env=self.env)
+        gc = state_of(city)["gc"]
+        print("gc sizes:", json.dumps({k: gc.get(k) for k in ("bytes_before", "bytes_after", "journal_bytes_before",
+                                                             "journal_bytes_after", "commits", "verified")}), flush=True)
+        self.assertTrue(gc["verified"], gc)
+        self.assertEqual(gc["commits"], len(commits))
+        self.assertEqual(gc["journal_bytes_before"], journal_before)
+        self.assertLess(gc["bytes_after"], gc["bytes_before"], "noms did not shrink")
+        self.assertLess(gc["journal_bytes_after"], journal_before, "the journal did not shrink")
+        self.assertFalse((noms / ("v" * 32)).exists() and (noms / ("v" * 32)).stat().st_size >= journal_before)
+        self.assertEqual(server.commits(db), commits)
+        self.assertEqual(self.snapshot(db, commits), before, "rows at some commit changed")
+        head_rows = server.rows(db)
+        self.assertEqual(sum(1 for r in head_rows[1:] if r[0].startswith("pw-event-")), 2)
+        self.assertEqual(sum(1 for r in head_rows[1:] if r[0].startswith("pw-op-")), 1)
+        # Backups are accepted again, and a fresh clone of the pushed ref is complete.
+        maintenance(server, ws, city, "backup", "--backup-root", str(root), env=self.env)
+        self.assertEqual(state_of(city)["backup"]["hourly"], 1)
+        remote = server.base / "gc-remote.git"
+        subprocess.run(["git", "init", "-q", "--bare", str(remote)], check=True, env=self.env)
+        seed = server.base / "gc-seed"
+        subprocess.run(["git", "init", "-q", str(seed)], check=True, env=self.env)
+        subprocess.run(["git", "commit", "-q", "--allow-empty", "-m", "seed"], cwd=seed, check=True, env=self.env)
+        subprocess.run(["git", "push", "-q", str(remote), "HEAD:refs/heads/main"], cwd=seed, check=True, env=self.env)
+        url = "git+file://" + str(remote)
+        maintenance(server, ws, city, "replicate", "--remote", url, "--ref", REF, env=self.env)
+        clone_base = server.base / "gc-clone"
+        clone_base.mkdir()
+        result = subprocess.run(["dolt", "clone", "--ref", REF, url, "restored"], cwd=clone_base, env=self.env,
+                                capture_output=True, text=True, timeout=600)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        restored = clone_base / "restored"
+        self.assertEqual(offline_commits(restored, self.env), commits)
+        self.assertEqual(offline_rows(restored, self.env), head_rows)
+        self.assertEqual(offline_rows(restored, self.env, "SELECT * FROM dependencies ORDER BY 1, 2, 3"),
+                         server.rows_as_of(db, "dependencies", commits[0]))
+        # A GC whose verification cannot run is not a success.
+        result = maintenance(server, ws, city, "gc", "--data-dir", str(server.base / "nowhere"), env=self.env, expect=1)
+        self.assertIn("data_dir_unreadable", result.stderr)
+        self.assertFalse(state_of(city)["gc"]["verified"])
 
 
 if __name__ == "__main__":

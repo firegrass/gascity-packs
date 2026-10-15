@@ -78,10 +78,12 @@ recoverable as ADR-0236 asks: `main` is pushed to the orchestrator git remote
 under `refs/dolt/liskov-work-beads` (code refs untouched), one verified
 full-history Dolt backup an hour is kept 24 times hourly and 30 times daily,
 and the doctor writes `<city>/proof/work-retention.json` for admission to
-read. The `work-retention` doctor check reports the same. The ledger is not a
+read; `gc` reclaims the noms journal through `CALL DOLT_GC()` and reports
+success only after proving every commit and every AS OF row count survived,
+and `backup` refuses while the journal is over 512 MiB. The `work-retention` doctor check reports the same. The ledger is not a
 rig, so these scripts address the sql-server with explicit `--workspace`
-arguments and refuse ambient `BEADS_*`/`BD_*` overrides; the reasons are in
-the script header. The operator's city.toml change, including the compactor
+arguments and strip ambient `BEADS_*`/`BD_*` overrides from their
+subprocesses, recording the names; the reasons are in the script header. The operator's city.toml change, including the compactor
 allowlist that keeps `gc dolt compact` off the ledger, is
 `docs/work-retention-install.md`.
 
@@ -111,8 +113,10 @@ client keeps its Markdown-on-main path byte for byte. Under `authority: beads`:
   attempt, catches the helper's last-active-child refusal and holds that item
   for a person as before, and lands ADR delivery bookkeeping as a docs change;
 - the keeper renews an expiring lease itself; the live-result publisher lands
-  its two documents, records the raw record through `evidence` and completes a
-  pass with the landing commit as its merge and main identity.
+  its two documents, completes a pass with the landing commit as its merge and
+  main identity, and only then records the raw record through `evidence` — an
+  evidence entry is part of the semantic digest a completion is bound to, so
+  it is appended after, never before.
 
 A marker carrying `freeze: true` (either authority) is a write freeze: the
 dispatcher admits and claims nothing, the completer completes and renews

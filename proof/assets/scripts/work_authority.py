@@ -40,8 +40,11 @@ RETENTION_SCHEMA = "proof.work-retention.v1"
 RETENTION_MAX_AGE = 600       # seconds: the file must be younger than ten minutes
 RETENTION_MAX_LAG = 300       # seconds: replication lag the dispatcher admits under
 # A completion the helper refuses because the item is the last active child of
-# its epic. The reason is one line on stderr; these are the words it carries.
-LAST_CHILD_RE = re.compile(r"last active child|close_epic|closing .*epic|epic .* no active child", re.I)
+# its epic: `proof_work_evaluate.complete` says "last active child of <EPIC>:
+# a person must complete with close_epic". Matched on that sentence, so the
+# epic's other refusals ("close_epic requires…", "can never close an epic")
+# are never mistaken for a hold.
+LAST_CHILD_RE = re.compile(r"last active child of \S+: a person must complete with close_epic", re.I)
 
 
 class ClientRefused(admit.Refused):
