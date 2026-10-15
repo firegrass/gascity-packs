@@ -22,6 +22,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`verify-message`: ask Slack who wrote a message, for answer
+  provenance** (`adapter/verify.go`, `commands/verify-message`).
+  `POST /verify-message {channel, ts}` on the internal listener only
+  (`GC_SERVICE_SOCKET`; never the public mux) reads the message back with
+  the adapter's own bot token — `conversations.replies` selected by exact
+  ts across pages (bounded at 10 pages, past which it refuses),
+  `conversations.history` as the fallback when Slack answers
+  `thread_not_found` or the walk ends without an exact match, and
+  `chat.getPermalink` — and returns
+  `{channel, ts, thread_ts, user, text, permalink, edited}`. A missing,
+  bot- or app-authored (`bot_id`, `app_id`, `bot_profile`), system,
+  author-less or foreign-workspace message, a Slack `ok: false`, an empty
+  permalink, an undecodable Slack body, a 429 (with `Retry-After`
+  surfaced) and a malformed request are each a typed non-2xx refusal,
+  never an empty success. No new OAuth
+  scope. Supporting changes: the mux construction moved into
+  `newPublicMux`/`newInternalMux` (so a test pins that the public mux 404s
+  the route), and the Slack client grew a query-string `slackGet` for read
+  methods and a typed `slackHTTPError` carrying the status and
+  `Retry-After` (its message is unchanged).
+  - **Fork divergence:** this is a firegrass/gascity-packs addition, not
+    yet in upstream `gastownhall/gascity-packs`. It is self-contained to
+    `slack-channel` (adapter, one verb, README) with no dependency on other
+    fork changes, so it can be offered upstream as one change.
 - **Socket Mode transport** (`adapter/socketmode.go`), an ingress-free
   alternative to the public Events API listener: the adapter opens an
   outbound WebSocket to Slack instead of receiving webhooks, so the pack
