@@ -18,6 +18,11 @@ Then `notes since last report`: every unread `NOTE:` mail to `human` created in
 the window, per rig — a worker sends one while PROCEEDING, so it is never
 pushed or counted as needing a person (BKLG-20260924-fuyh). Once the report is
 mailed those NOTEs are marked read; `--print` leaves them unread.
+
+When `LISKOV_FACTORY_SLACK_CHANNEL` names a Slack channel the report is also
+posted there once per run that sends it — even when the mail failed, since a run
+is never retried (ADR-0237 §3); `--print` never posts. A failed post is logged
+and changes nothing else; mail stays the record.
 """
 from __future__ import annotations
 
@@ -32,6 +37,7 @@ from statistics import median
 import factory_lib as fl
 from factory_lib import admit
 import ci_minutes
+import factory_slack
 import tokens
 import watchdog
 import recovery_metrics
@@ -128,9 +134,11 @@ def main(argv):
     lines += notes_section(digested, lambda m: watchdog.mail_body(city, m["id"]))
     text = "\n".join(lines)
     print(text)
-    if "--print" not in argv and fl.mail("PROOF factory report", text):
-        for m in digested:
-            admit.gc(city, "mail", "mark-read", m["id"], check=False)
+    if "--print" not in argv:
+        if fl.mail("PROOF factory report", text):
+            for m in digested:
+                admit.gc(city, "mail", "mark-read", m["id"], check=False)
+        factory_slack.notify("report", "PROOF factory report", text, key="proof-report/" + ceiling)
     return 0
 
 

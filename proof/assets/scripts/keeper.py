@@ -15,6 +15,12 @@ States it reports, each at most once per work bead (recorded as
 
 It reads the backlog from the Gas City-owned orchestrator clone after a
 fast-forward, never from the shared checkout.
+
+Mail is the record. When `LISKOV_FACTORY_SLACK_CHANNEL` names a Slack channel,
+each notice that was mailed is also posted there once (ADR-0237 §3), under the
+same `proof.notified` mark: a notice that is not re-mailed is not re-posted, and
+one whose mail failed is posted with the mail on the next pass. A failed post is
+logged and changes nothing else.
 """
 from __future__ import annotations
 
@@ -24,6 +30,8 @@ import os
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
+
+import factory_slack
 
 BACKLOG_REPO = "liskov-agent-orchestrator"
 RECIPIENT = os.environ.get("PROOF_KEEPER_RECIPIENT", "human")
@@ -140,6 +148,7 @@ def notify(rig, bead, state, subject, body):
         return
     sh(["gc", "bd", "--rig", rig, "update", bead["id"], "--set-metadata", "proof.notified=" + state])
     print("keeper: %s %s -> %s" % (bead["id"], state, RECIPIENT))
+    factory_slack.notify("keeper", subject, body, key="proof-keeper/%s/%s/%s" % (rig, bead["id"], state))
 
 
 def main():
