@@ -41,6 +41,7 @@ Stop. Do not look around for something to review. If the action is `work`,
    TREE=$(git -C <worktree> rev-parse 'HEAD^{tree}')
    gc bd update <id> \
      --set-metadata proof.review_verdict=<approve|iterate|reject> \
+     --set-metadata proof.review_findings=<n> \
      --set-metadata proof.reviewed_tree="$TREE" \
      --set-metadata gc.outcome=pass \
      --set-metadata gc.work_outcome=no-op --status closed
@@ -48,7 +49,10 @@ Stop. Do not look around for something to review. If the action is `work`,
    (`no-op` is the typed work record for a step that commits nothing, which a
    review never does; the verdict is what carries your judgement.)
    Put the findings in the bead notes (`--append-notes`), most severe first,
-   each with file, line and a concrete failure scenario. `gc.outcome=pass` means
+   each with file, line and a concrete failure scenario. `proof.review_findings`
+   is how many findings the notes carry — `0` for an approval with no remarks;
+   the per-packet outcome record counts it, and a missing number is recorded as
+   a gap, never as zero. `gc.outcome=pass` means
    *the review step ran*, not that the change is good: a `reject` verdict is
    still a passed review step.
 
