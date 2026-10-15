@@ -21,7 +21,7 @@ import sys
 import tempfile
 
 SCHEMA = 'proof.timeline.v1'
-KINDS = {'attempt', 'gate', 'recovery', 'workflow', 'ci', 'collection'}
+KINDS = {'attempt', 'gate', 'recovery', 'workflow', 'ci', 'collection', 'outcome'}
 IDENTITY = re.compile(r'[A-Za-z0-9_./:@+\-]{1,240}\Z')
 FIELDS = {
     'attempt': {'packet', 'group', 'workflow', 'state', 'superseded', 'admission_pending',
@@ -37,11 +37,26 @@ FIELDS = {
     'ci': {'packet', 'group', 'attempt', 'workflow', 'phase', 'state', 'commit', 'event', 'created_at', 'closed_at', 'seconds', 'gaps'},
     'collection': {'attempts', 'workflows', 'gates', 'recoveries', 'ci_runs', 'completed_packets', 'delivered_packets',
                    'input_tokens', 'output_tokens', 'usage_coverage', 'gaps'},
+    # One per delivered packet (packet_outcomes.py, ADR-0238 §10): the facts a
+    # model-tier judgement reads, written once at completion.
+    'outcome': {'packet', 'workflow', 'state', 'landing', 'attempts', 'workflow_roots', 'prior_beads',
+                'load_context_attempts', 'implement_iterations', 'gate_first_pass', 'review_rounds',
+                'review_findings', 'review_verdicts', 'provider_by_role', 'model_by_role', 'sessions',
+                'wall_hours', 'active_hours', 'timebox', 'timebox_hours_max', 'wall_over_timebox',
+                'cost_usd', 'cost_by_model', 'tokens_by_model', 'unpriced_facts', 'model_floor',
+                'landed', 'merge_commit', 'main_green', 'engine', 'pack_commit', 'created_at', 'closed_at', 'gaps'},
 }
 NUMBERS = {'input_tokens', 'output_tokens', 'cache_read_tokens', 'cache_write_tokens',
            'interventions', 'seconds', 'attempts', 'workflows', 'gates', 'recoveries', 'ci_runs',
-           'completed_packets', 'delivered_packets'}
+           'completed_packets', 'delivered_packets', 'workflow_roots', 'prior_beads', 'load_context_attempts',
+           'implement_iterations', 'review_rounds', 'review_findings', 'sessions', 'wall_hours', 'active_hours',
+           'timebox_hours_max', 'wall_over_timebox', 'cost_usd', 'unpriced_facts'}
 BOOLEANS = {'superseded', 'admission_pending', 'reused'}
+# Recorded as true/false/None: None is "could not tell", never a pass.
+NULLABLE_BOOLEANS = {'gate_first_pass'}
+# identity -> number, and identity -> identity: the per-model and per-role breakdowns.
+NUMBER_MAPS = {'cost_by_model', 'tokens_by_model'}
+LABEL_MAPS = {'review_verdicts', 'provider_by_role', 'model_by_role'}
 
 
 class Refused(ValueError):
@@ -105,7 +120,7 @@ def validate(row):
     if identity(row['rig']) is None or identity(row['source']) is None or timestamp(row['collected_at']) != row['collected_at'] or row['collected_at'] is None:
         raise Refused('invalid timeline identity/time')
     facts = row['facts']
-    optional = {'commit', 'merge_commit', 'main_green'} if row['kind'] == 'attempt' else set()
+    optional = {'commit', 'merge_commit', 'main_green'} if row['kind'] in ('attempt', 'outcome') else set()
     if not isinstance(facts, dict) or not FIELDS[row['kind']] - optional <= set(facts) <= FIELDS[row['kind']]:
         raise Refused('invalid or unexpected facts')
     for key, value in facts.items():
@@ -121,6 +136,16 @@ def validate(row):
         elif key in BOOLEANS:
             if type(value) is not bool:
                 raise Refused('invalid boolean fact')
+        elif key in NULLABLE_BOOLEANS:
+            if value is not None and type(value) is not bool:
+                raise Refused('invalid boolean fact')
+        elif key in NUMBER_MAPS:
+            if not isinstance(value, dict) or any(identity(k) is None or type(v) not in (int, float) or number(v) is None
+                                                  for k, v in value.items()):
+                raise Refused('invalid number map')
+        elif key in LABEL_MAPS:
+            if not isinstance(value, dict) or any(identity(k) is None or identity(v) is None for k, v in value.items()):
+                raise Refused('invalid label map')
         elif key.endswith('_at'):
             if value is not None and (timestamp(value) is None or timestamp(value) != value):
                 raise Refused('invalid source timestamp')
@@ -170,7 +195,8 @@ def export(rig, packets, beads, usage, collected_at, ci_runs=None):
         facts = dict(packet=identity(packet['id']), group=identity(md.get('proof.delivery_group')),
             workflow=identity(root.get('id')), state=identity(packet['state']),
             superseded=bool(packet.get('superseded')), admission_pending=bool(packet.get('admission_pending')),
-            contract=identity(md.get('proof.contract_id')), recipe=identity(md.get('proof.pack_tree')),
+            contract=identity(md.get('proof.contract_id')),
+            recipe=identity(md.get('proof.pack_tree')) if md.get('proof.pack_tree') not in (None, '', 'unknown') else identity(md.get('proof.pack_commit')),
             engine=identity(md.get('proof.engine_commit')), provider=identity(md.get('proof.provider')),
             model=identity(md.get('proof.model')), phase=None,
             created_at=timestamp(work.get('created_at')), closed_at=timestamp(root.get('closed_at')),

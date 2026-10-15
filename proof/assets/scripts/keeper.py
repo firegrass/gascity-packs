@@ -38,6 +38,8 @@ RECIPIENT = os.environ.get("PROOF_KEEPER_RECIPIENT", "human")
 EXPIRY_WARNING = timedelta(hours=1)
 RIG_PATHS = {}
 RIG_USAGE = {}
+RIG_BEADS = {}        # every bead of the rig, for the outcome record at completion
+BACKLOG_CLONE = ""    # the Gas City-owned orchestrator clone, for the ledger row
 
 
 def sh(argv, cwd=None):
@@ -138,9 +140,29 @@ def record_tokens(rig, rig_path, bead, packet_id):
                use["conversations"]))
 
 
+def record_outcome(rig, bead):
+    """The per-packet outcome facts (ADR-0238 §10): one record and the bead
+    stamps, once, when the packet is delivered. A measurement must never stop
+    a notification, so every failure is a line on stderr."""
+    try:
+        import packet_outcomes
+        return packet_outcomes.record(fl_city(), rig, bead, RIG_BEADS.get(rig, []), BACKLOG_CLONE)
+    except Exception as why:  # noqa: BLE001
+        print("keeper: could not record the outcome of %s: %s" % (bead.get("id"), why), file=sys.stderr)
+        return ""
+
+
+def fl_city():
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import factory_lib as fl
+    return fl.city_dir()
+
+
 def notify(rig, bead, state, subject, body):
     if state in ("done", "failed"):
         body += record_tokens(rig, RIG_PATHS.get(rig, ""), bead, (bead.get("metadata") or {}).get("proof.packet_id", ""))
+    if state == "done":
+        body += record_outcome(rig, bead)
     sent = sh(["gc", "mail", "send", RECIPIENT, "-s", subject, "-m", body])
     if sent.returncode != 0:
         print("keeper: could not mail %s about %s: %s" % (RECIPIENT, bead["id"], sent.stderr.strip()[-200:]),
@@ -170,6 +192,8 @@ def main():
         if (repo[:-4] if repo.endswith(".git") else repo) == BACKLOG_REPO:
             backlog_clone = path
             break
+    global BACKLOG_CLONE
+    BACKLOG_CLONE = backlog_clone
     if not backlog_clone:
         print("keeper: no Gas City-owned clone of %s; skipping claim-expiry checks" % BACKLOG_REPO,
               file=sys.stderr)
@@ -180,6 +204,7 @@ def main():
     now = datetime.now(timezone.utc)
     for rig in sorted(rigs):
         beads = gc_json("bd", "--rig", rig, "list", "--all", "--json", "--limit=0", default=[])
+        RIG_BEADS[rig] = beads
         import tokens
         RIG_USAGE[rig] = tokens.usage_by_admission(RIG_PATHS.get(rig, ""), beads)
         # A re-admitted packet has one workflow root per attempt. Judge each work

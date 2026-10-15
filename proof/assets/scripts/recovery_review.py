@@ -59,7 +59,7 @@ def trial_for(city, rig, packet, history):
 
 def provenance(city):
     """Diagnostic run identity, never an authorization or a completion receipt."""
-    result = {"proof.engine_commit": "unknown", "proof.pack_tree": "unknown"}
+    result = {"proof.engine_commit": "unknown", "proof.pack_tree": "unknown", "proof.pack_commit": "unknown"}
     try:
         payload = json.loads(admit.gc(city, "version", "--json").stdout)
         if not isinstance(payload, dict):
@@ -73,6 +73,11 @@ def provenance(city):
         for line in (Path(city) / "proof/deployed-pack.txt").read_text().splitlines():
             if re.fullmatch(r"pack_tree=[0-9a-f]{40}", line):
                 result["proof.pack_tree"] = line.split("=", 1)[1]
+            # deploy-pack.sh writes the pack COMMIT (and sha256), not the tree,
+            # since the pin moved to proof-pack.lock.json; the timeline's
+            # recipe reads it when the tree is unknown.
+            if re.fullmatch(r"pack_commit=[0-9a-f]{40}", line):
+                result["proof.pack_commit"] = line.split("=", 1)[1]
     except OSError:
         result["proof.provenance_gap"] = "installed pack receipt unavailable"
     return result

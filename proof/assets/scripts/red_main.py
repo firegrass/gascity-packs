@@ -485,7 +485,28 @@ def do_revert_pr(clone, slug, rig, found, dry_run):
         os.unlink(fh.name)
     if made.returncode != 0:
         return "", "could not open the pull request: %s" % (made.stderr or made.stdout).strip()[-200:]
+    stamp_reverted(rig, found, sha, made.stdout.strip()[-200:])
     return "revert:%s" % sha[:10], "opened a revert pull request, unmerged: %s" % made.stdout.strip()[-200:]
+
+
+def stamp_reverted(rig, found, sha, pr_url):
+    """Record on the OWNING packet's work bead that its commit was reverted
+    (ADR-0238 §10: a revert is an outcome fact of the packet, and the record
+    written at completion cannot know a later one). Best-effort: a stamp that
+    fails is a line on stderr, never a reason not to have opened the PR."""
+    pid = found.get("packet") or ""
+    if not pid:
+        return
+    try:
+        work = next((p["bead"] for p in fl.packets(fl.city_dir(), rig) if p["id"] == pid), None)
+        if work is None:
+            return
+        fl.sh(["gc", "bd", "--rig", rig, "update", work["id"],
+               "--set-metadata", "proof.reverted_sha=%s" % sha,
+               "--set-metadata", "proof.revert_pr=%s" % (pr_url.split()[-1] if pr_url else ""),
+               "--set-metadata", "proof.reverted_at=%s" % datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")])
+    except Exception as why:  # noqa: BLE001
+        print("red_main: could not stamp the revert on %s: %s" % (pid, why), file=sys.stderr)
 
 
 def bead_body(found, attempts, max_attempts):

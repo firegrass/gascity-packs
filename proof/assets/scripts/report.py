@@ -26,8 +26,10 @@ and changes nothing else; mail stays the record.
 """
 from __future__ import annotations
 
+import json
 import os
 import re
+import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 from math import ceil
@@ -41,6 +43,48 @@ import factory_slack
 import tokens
 import watchdog
 import recovery_metrics
+
+
+def outcome_section(city, floor):
+    """Stage 1b (ADR-0238 §10): the per-packet outcome rollup by worker model,
+    and whether the engine's own cost and reliability instrumentation is whole
+    — unpriced facts written since the pricing landed, and operation events
+    without a model. Every line is a readback; nothing here decides anything."""
+    import packet_outcomes
+    try:
+        out = packet_outcomes.lines(city, floor)
+    except (OSError, ValueError) as why:
+        out = ["stage 1b outcomes: unreadable: %s" % why]
+    try:
+        facts, unpriced, since_floor = 0, 0, 0
+        floor_ms = int(datetime.strptime(floor, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp() * 1000)
+        with open(os.path.join(city, ".gc/usage.jsonl"), encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                try:
+                    fact = json.loads(line)
+                except ValueError:
+                    continue
+                if fact.get("kind") != "model":
+                    continue
+                facts += 1
+                if int(fact.get("at") or 0) >= floor_ms:
+                    since_floor += 1
+                    unpriced += 1 if fact.get("unpriced") else 0
+        out.append("  usage facts    %d model facts in the window, %d unpriced (gc costs prices a fact when it is written)"
+                   % (since_floor, unpriced))
+    except OSError as why:
+        out.append("  usage facts    unreadable: %s" % why)
+    try:
+        rel = fl.sh(["gc", "analyze", "reliability", "--since", "1d", "--json"], cwd=city if os.path.isdir(city) else None)
+        doc = json.loads(rel.stdout or "{}")
+        inst = doc.get("instrumentation") or {}
+        models = sorted({(g.get("key") or {}).get("model") or "—" for g in doc.get("groups", [])})
+        out.append("  reliability    %d worker.operation event(s), model missing on %d; models seen: %s"
+                   % (int(inst.get("worker_operations") or 0), int(inst.get("missing_model") or 0), ", ".join(models) or "none"))
+    except (ValueError, OSError, subprocess.SubprocessError, AttributeError) as why:
+        # The report must mail whatever happens to one readback.
+        out.append("  reliability    gc analyze reliability unavailable: %s" % (why or "no JSON"))
+    return out
 
 
 def main(argv):
@@ -118,6 +162,7 @@ def main(argv):
                   "  reverts        %d on main%s" % (len(reverts), "".join("\n    " + r for r in reverts))]
         lines += (gates + scorecards + ci_section(clone, policy.get("rigs", {}).get(rig, {}), floor, ceiling)
                   + recovery_metrics.lines(window, beads, usage) + [""] + rows + [""])
+    lines += outcome_section(city, floor) + [""]
     try:
         backlog = admit.backlog_clone_of(rigs)
         home = next(r for r in rigs if os.path.realpath(rigs[r].get("Path") or "") == os.path.realpath(backlog))
