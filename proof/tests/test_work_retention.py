@@ -367,6 +367,67 @@ class Replication(ServerCase):
         self.assertIn("replication_remote_mismatch", state_of(city)["replication"]["last_error"])
         self.assertEqual(state_of(city)["replication"]["pushed_revision"], before["pushed_revision"])
 
+    def test_force_push_replaces_the_history_of_a_reinitialised_ledger(self):
+        """A cutover reset drops and re-creates the database, so the next
+        import is an unrelated Dolt history: a plain push is refused ("no
+        common ancestor") and only `--force --reason` replaces the ref. The
+        git-remote cache is carried across the re-creation the way the
+        runbook does it; wiped under a running server, Dolt keeps a dead
+        handle and every push fails until the server restarts (observed
+        2026-10-15, live ledger)."""
+        server = self.server
+        ws = server.workspace("force-project", "proof_test_force")
+        city = server.base / "force-city"
+        (city / "proof").mkdir(parents=True)
+        remote = server.base / "force-remote.git"
+        subprocess.run(["git", "init", "-q", "--bare", str(remote)], check=True, env=self.env)
+        seed = server.base / "force-seed"
+        subprocess.run(["git", "init", "-q", str(seed)], check=True, env=self.env)
+        subprocess.run(["git", "commit", "-q", "--allow-empty", "-m", "seed"], cwd=seed, check=True, env=self.env)
+        subprocess.run(["git", "push", "-q", str(remote), "HEAD:refs/heads/main"], cwd=seed, check=True, env=self.env)
+        url = "git+file://" + str(remote)
+        server.seed(ws, 2)
+        maintenance(server, ws, city, "replicate", "--remote", url, "--ref", REF, env=self.env)
+        first = state_of(city)["replication"]["pushed_revision"]
+        self.assertEqual(first, server.head("proof_test_force"))
+        # Re-initialise the ledger the way the cutover reset does, keeping the cache.
+        cache = server.data_dir / "proof_test_force" / ".dolt" / "git-remote-cache"
+        self.assertTrue(cache.is_dir(), "the first push created the git-remote cache")
+        kept = server.base / "kept-cache"
+        shutil.copytree(cache, kept, symlinks=True)
+        subprocess.run(["dolt", "--host", "127.0.0.1", "--port", str(server.port), "--user", "root", "--password", "",
+                        "--no-tls", "sql", "-q", "DROP DATABASE `proof_test_force`"], check=True, env=self.env,
+                       capture_output=True, text=True)
+        shutil.rmtree(server.base / "force-project")
+        ws = server.workspace("force-project", "proof_test_force")
+        shutil.copytree(kept, cache, symlinks=True)
+        server.seed(ws, 3)
+        self.assertNotEqual(server.head("proof_test_force"), first)
+        result = maintenance(server, ws, city, "replicate", "--remote", url, "--ref", REF, env=self.env, expect=1)
+        self.assertIn("no common ancestor", result.stderr + state_of(city)["replication"]["last_error"])
+        self.assertEqual(state_of(city)["replication"]["pushed_revision"], first, "a refused push records nothing new")
+        result = maintenance(server, ws, city, "replicate", "--remote", url, "--ref", REF, "--force", env=self.env, expect=1)
+        self.assertIn("--reason", result.stderr)
+        maintenance(server, ws, city, "replicate", "--remote", url, "--ref", REF, "--force", "--reason",
+                    "cutover import epoch test", env=self.env)
+        state = state_of(city)["replication"]
+        self.assertEqual(state["pushed_revision"], server.head("proof_test_force"))
+        self.assertEqual(state["forced_reason"], "cutover import epoch test")
+        self.assertIsNotNone(state["forced_at"])
+        self.assertEqual(state["lag_seconds"], 0)
+        # The replaced ref clones back to exactly the new history.
+        clone_base = server.base / "force-clone"
+        clone_base.mkdir()
+        result = subprocess.run(["dolt", "clone", "--ref", REF, url, "restored"], cwd=clone_base, env=self.env,
+                                capture_output=True, text=True, timeout=600)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(offline_commits(clone_base / "restored", self.env), server.commits("proof_test_force"))
+        self.assertEqual(offline_rows(clone_base / "restored", self.env), server.rows("proof_test_force"))
+        # A plain push after the force is an ordinary fast-forward again.
+        server.create_issue(ws, "After force")
+        maintenance(server, ws, city, "replicate", "--remote", url, "--ref", REF, env=self.env)
+        self.assertEqual(state_of(city)["replication"]["pushed_revision"], server.head("proof_test_force"))
+
     def test_strips_ambient_routing_override(self):
         """The city's controller sets BD_* for every exec order; they are
         stripped from the dolt/bd subprocesses and recorded, never refused."""
