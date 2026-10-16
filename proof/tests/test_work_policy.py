@@ -7,7 +7,7 @@ import unittest
 SCRIPTS = Path(__file__).resolve().parents[1] / 'assets/scripts'
 sys.path.insert(0, str(SCRIPTS))
 import proof_work_policy as policy
-from proof_work_records import SCHEMA, Corpus, Refused, decode, digest, encode, relationships, semantic, validate_corpus
+from proof_work_records import SCHEMA, Corpus, Refused, bead_id, decode, digest, encode, relationships, semantic, validate_corpus
 from proof_work_evaluate import evaluate
 
 NOW = '2026-10-14T18:00:00Z'
@@ -549,6 +549,70 @@ class ActionTests(unittest.TestCase):
         with self.assertRaisesRegex(Refused, 'schema registration'):
             self.ledger.act('edit', rid='BKLG-20260101-cccc', expected_authored_revision=1, fields=dict(brand_new='x'))
 
+
+
+
+class EvidenceOutsideTheContract(unittest.TestCase):
+    """`evidence` is bookkeeping the factory writes while an attempt runs; it
+    never moves the semantic digest the completion must match (0.43.1)."""
+
+    def setUp(self):
+        self.ledger = Ledger(reservations_reconciled=True)
+
+    def snapshot(self):
+        return rows_by_id(self.ledger.do(dict(action='snapshot', epoch='test')))
+
+    def test_merged_evidence_then_completion_with_the_admission_digest(self):
+        claimed = self.ledger.act('claim')['result']
+        bound = claimed['semantic_digest']
+        after = self.ledger.act('evidence', entries=['merged:' + 'c' * 40])['result']
+        self.assertEqual(after['semantic_digest'], bound)
+        self.assertEqual(after['operational_revision'], claimed['operational_revision'] + 1)
+        self.assertEqual(self.snapshot()['BKLG-20260101-bbbb']['fields']['evidence'], ['merged:' + 'c' * 40])
+        out = self.ledger.act('complete', lease_id=claimed['lease_id'], expected_semantic_digest=bound,
+                              resolution='done', evidence=dict(pull_request=PR, main_sha='b' * 40,
+                                                               attempts=[dict(bead_id='lrs-1', rig='lrs')]))
+        self.assertEqual(out['result']['status'], 'done')
+        self.assertEqual(out['events'][0]['after']['fields']['evidence'], ['merged:' + 'c' * 40, PR])
+
+    def test_a_real_edit_between_claims_still_refuses_the_stale_contract(self):
+        first = self.ledger.act('claim')['result']
+        with self.assertRaisesRegex(Refused, 'release retained claim before editing'):
+            self.ledger.act('edit', actor='patrick', expected_authored_revision=first['authored_revision'],
+                            fields=dict(title='Synthetic item, re-shaped'))
+        self.ledger.act('release', lease_id=first['lease_id'])
+        self.ledger.act('edit', actor='patrick', expected_authored_revision=first['authored_revision'],
+                        fields=dict(title='Synthetic item, re-shaped'))
+        again = self.ledger.act('claim')['result']
+        self.assertNotEqual(again['semantic_digest'], first['semantic_digest'])
+        with self.assertRaisesRegex(Refused, 'semantic contract changed'):
+            self.ledger.act('complete', lease_id=again['lease_id'], expected_semantic_digest=first['semantic_digest'],
+                            resolution='done', evidence=dict(pull_request=PR, main_sha='b' * 40,
+                                                             attempts=[dict(bead_id='lrs-1', rig='lrs')]))
+
+    def test_a_row_stamped_under_the_legacy_formula_is_read_and_served_under_the_current_one(self):
+        import execution_contract as ec
+        rid = 'BKLG-20260101-cccc'
+        issue = self.ledger.issues[bead_id(rid)]
+        row = issue['metadata']['proof']
+        row['fields']['evidence'] = ['merged:' + 'd' * 40]
+        legacy = digest(ec.legacy_semantic(row['fields'], row['body']))
+        current = digest(semantic(row['fields'], row['body']))
+        self.assertNotEqual(legacy, current)
+        row['semantic_digest'] = legacy                      # as 0.43.0 stored it
+        served = self.snapshot()[rid]
+        self.assertEqual(served['semantic_digest'], current)
+        self.assertEqual(served['fields']['evidence'], ['merged:' + 'd' * 40])
+        # The next mutation stores the current stamp.
+        claimed = self.ledger.act('claim', rid=rid)['result']
+        self.assertEqual(claimed['semantic_digest'], current)
+        self.assertEqual(self.ledger.issues[bead_id(rid)]['metadata']['proof']['semantic_digest'], current)
+
+    def test_a_corrupt_stamp_is_still_refused(self):
+        rid = 'BKLG-20260101-cccc'
+        self.ledger.issues[bead_id(rid)]['metadata']['proof']['semantic_digest'] = '0' * 64
+        with self.assertRaisesRegex(Refused, 'semantic digest mismatch'):
+            self.ledger.do(dict(action='snapshot', epoch='test'))
 
 if __name__ == '__main__':
     unittest.main()

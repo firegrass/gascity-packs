@@ -7,7 +7,7 @@ import os
 import re
 
 import proof_work_policy as policy
-from execution_contract import digest, semantic
+from execution_contract import digest, legacy_semantic, semantic
 
 SCHEMA = 'proof.work.v1'
 TERMINAL = policy.TERMINAL_STATUSES
@@ -116,7 +116,7 @@ def validate_row(row):
     for name in ('authored_revision', 'operational_revision'):
         if type(row[name]) is not int or row[name] < (1 if name == 'authored_revision' else 0):
             raise Refused('invalid ' + name)
-    if row['semantic_digest'] != digest(semantic(fm, row['body'])):
+    if row['semantic_digest'] not in (digest(semantic(fm, row['body'])), digest(legacy_semantic(fm, row['body']))):
         raise Refused('semantic digest mismatch: ' + row['id'])
     scopes = row.get('reserved_scopes', [])
     if not isinstance(scopes, list) or any(not isinstance(scope, list) or len(scope) != 2
@@ -154,6 +154,9 @@ def decode(issue):
     if (issue.get('ephemeral') or issue.get('no_history') or issue.get('compaction_level', 0)
             or issue.get('storage_class', 'versioned') != 'versioned'):
         raise Refused('project history retention drift: ' + issue['id'])
+    # Every reader sees the current contract: a row stamped under the legacy
+    # formula is served, compared and (on its next write) stored under this one.
+    row['semantic_digest'] = digest(semantic(row['fields'], row['body']))
     return row
 
 

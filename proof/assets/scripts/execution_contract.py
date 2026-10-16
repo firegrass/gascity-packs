@@ -35,7 +35,15 @@ SCHEMAS = {SCHEMA: "schemas/proof.contract.v1.json", SCHEMA_V2: "schemas/proof.c
 # work; they are recorded, not reconciled.
 WORK_VOLATILE = ("lease_id", "operational_revision", "ledger_revision")
 PILOTS = {"liskov-agent-orchestrator", "liskov-rs"}
-VOLATILE = {"status", "claimed_by", "claimed_at", "claim_expires", "last_reviewed"}
+# Bookkeeping the ledger writes without changing the task: lifecycle, the
+# claim, review stamps and `evidence`. Evidence is appended by the factory's
+# own seat while the attempt runs (pack 0.43.0 records `merged:<sha>` on the
+# working item so a merged claim stops excluding scope) and by the completion
+# itself; a contract that moved on its own evidence refused every completion
+# after that write (2026-10-16). Rows stamped before `evidence` left the
+# digest still carry the legacy value: `legacy_semantic` recognises them.
+VOLATILE = {"status", "claimed_by", "claimed_at", "claim_expires", "last_reviewed", "evidence"}
+LEGACY_VOLATILE = {"status", "claimed_by", "claimed_at", "claim_expires", "last_reviewed"}
 HEX = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -109,6 +117,12 @@ def semantic(fm, body):
     # Only frontmatter bookkeeping is excluded. Body lines named status, etc.
     # remain task meaning. Lifecycle and ownership are always checked separately.
     return {"fields": {k: v for k, v in fm.items() if k not in VOLATILE}, "body": body}
+
+
+def legacy_semantic(fm, body):
+    """The contract as rows were stamped before `evidence` became volatile;
+    a stored digest under this formula is valid until the row is rewritten."""
+    return {"fields": {k: v for k, v in fm.items() if k not in LEGACY_VOLATILE}, "body": body}
 
 
 def claim_identity(item, fm, rig, instant=None):
