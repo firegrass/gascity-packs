@@ -91,9 +91,11 @@ Run the trusted integration helper (repeat-safe on this attempt):
 python3 "$GC_CITY/packs/proof/assets/scripts/pr_recovery.py" integrate {{pr_recovery_key}}
 ```
 
-It integrates the recorded base and regenerates the known policy-client bundle
-through its repository-owned generator. It never chooses a source conflict's
-meaning. Resolve remaining source conflicts within the packet's outcome,
+It integrates the recorded base and regenerates every conflicting generated
+file through its repository-owned generator (the policy-client bundle, the
+service census and Cargo metadata fixture, `Cargo.lock`); it prints what it
+regenerated and `remaining_source_conflicts`. It never chooses a source
+conflict's meaning. Resolve remaining source conflicts within the packet's outcome,
 preserving main's changes. Escalate ambiguous contracts or ownership. Commit
 the merge and any focused fixes by path. Never force-push or change main.
 

@@ -124,7 +124,7 @@ def evaluate(data):
         for other in corpus.items:
             other_row = by_id[p.record_id(other)]
             other_scopes = p.write_scopes(other) or [tuple(scope) for scope in other_row.get('reserved_scopes', [])]
-            if p.record_id(other) != rid and p.claim(other, now)[0] == 'live' and p.claims_collide(scopes, other_scopes):
+            if p.record_id(other) != rid and p.blocks_scope(other, now) and p.claims_collide(scopes, other_scopes):
                 raise Refused('scope overlaps live claim: ' + p.record_id(other))
         row['reserved_scopes'] = [list(scope) for scope in scopes]
         fm.update(status='working', claimed_by=actor, claimed_at=at, claim_expires=expiry(request, now))

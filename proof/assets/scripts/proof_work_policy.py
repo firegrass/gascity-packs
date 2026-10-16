@@ -138,6 +138,32 @@ def blockers(corpus, record):
     ]
 
 
+def merged_commit(record):
+    """The merge commit a working item's pull request landed as, or None.
+
+    The completer records `merged:<sha>` as an evidence entry the moment it
+    sees the pull request MERGED (BKLG-20261016-dk56); the claim itself stays
+    until `main` is green and the item is completed (ADR-0115)."""
+    entries = record.fm.get("evidence")
+    if not isinstance(entries, list):
+        return None
+    for entry in entries:
+        match = MERGED_EVIDENCE_RE.match(entry) if isinstance(entry, str) else None
+        if match:
+            return match.group(1)
+    return None
+
+
+def blocks_scope(record, now):
+    """True while this record's claim excludes other claims from its write scope.
+
+    A live claim blocks until its pull request has merged: after that the code
+    is on `main` and a later packet merges it in like any other landing, so
+    the claim keeps only its bookkeeping (WIP, awaiting-merge counts, red-main
+    ownership) and stops serializing the rig."""
+    return claim(record, now)[0] == "live" and merged_commit(record) is None
+
+
 def claim(record, now):
     """Return (state, detail): state is 'none' | 'live' | 'expired' | 'malformed'."""
     fm = record.fm
@@ -308,7 +334,23 @@ def scopes_overlap(a, b):
     return False
 
 
-CONTENT_ADDRESSED_SCOPE_ROOTS = (".sqlx",)
+# Paths a packet writes but never authors: regenerated from the tree by a
+# repository-owned generator and checked by CI, so two packets that both
+# regenerate them are not writing the same thing. They still route admission,
+# doctrine and reviewers as scope; they do not make two claims exclusive.
+# `.sqlx/**` is content-addressed (2026-09-26); the liskov-rs service census
+# and Cargo metadata fixture come from `validate-services.py --write-*`, the
+# policy-client bundle from `generate-policy-client-bundle.py --write`, and
+# `Cargo.lock` from Cargo (2026-10-16, BKLG-20261016-dk56). A merge conflict
+# on one is repaired by regenerating it (`pr_recovery.py integrate`).
+CONTENT_ADDRESSED_SCOPE_ROOTS = (
+    ".sqlx",
+    "Cargo.lock",
+    "crates/slipway-policy-client-contract/bundle",
+    "scripts/liskov/services-cargo-metadata.json",
+    "scripts/liskov/services-census.json",
+)
+MERGED_EVIDENCE_RE = re.compile(r"^merged:([0-9a-f]{7,40})$")
 
 
 def _content_addressed(path):

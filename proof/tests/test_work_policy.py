@@ -86,6 +86,50 @@ class PolicyTests(unittest.TestCase):
                         state=claimed['state'], issues=self.imported['writes'], edges=claimed['edges'], now=NOW)
             evaluate(data)
 
+    def test_derived_paths_route_scope_but_do_not_make_claims_collide(self):
+        a = [('liskov-rs', 'crates/a/src/x.rs'), ('liskov-rs', 'scripts/liskov/services-census.json'),
+             ('liskov-rs', 'scripts/liskov/services-cargo-metadata.json'), ('liskov-rs', 'Cargo.lock'),
+             ('liskov-rs', 'crates/slipway-policy-client-contract/bundle/policy-client-bundle.json')]
+        b = [('liskov-rs', 'crates/b/src/y.rs'), ('liskov-rs', 'scripts/liskov/services-census.json'),
+             ('liskov-rs', 'scripts/liskov/services-cargo-metadata.json'), ('liskov-rs', 'Cargo.lock'),
+             ('liskov-rs', 'crates/slipway-policy-client-contract/bundle/**')]
+        self.assertTrue(policy.scopes_overlap(a, b))
+        self.assertFalse(policy.claims_collide(a, b))
+        # The hand-written registry and inventories still serialize.
+        self.assertTrue(policy.claims_collide(a + [('liskov-rs', 'scripts/liskov/crate-boundaries.toml')],
+                                              b + [('liskov-rs', 'scripts/liskov/crate-boundaries.toml')]))
+        self.assertTrue(policy.claims_collide(a + [('liskov-rs', 'scripts/liskov/application-persistence-inventory.tsv')],
+                                              b + [('liskov-rs', 'scripts/liskov/application-persistence-inventory.tsv')]))
+
+    def test_a_merged_claim_no_longer_excludes_its_write_scope(self):
+        def merged_into(issues, writes):
+            updates = {i['id']: i for i in writes}
+            return [updates.get(i['id'], i) for i in issues]
+
+        def row_of(writes, rid):
+            return decode(next(w for w in writes if w['external_ref'] == rid))
+
+        claimed = self.call('claim')
+        issues = merged_into(self.imported['writes'], claimed['writes'])
+        racer = dict(action='claim', epoch='test', actor='seat2', operation_id='racer', id='BKLG-20260101-cccc')
+        with self.assertRaisesRegex(Refused, 'scope overlaps live claim: BKLG-20260101-bbbb'):
+            evaluate(dict(request=racer, state=claimed['state'], issues=issues, edges=claimed['edges'], now=NOW))
+        merged = evaluate(dict(request=dict(action='evidence', epoch='test', actor='seat', operation_id='merged',
+                                            id='BKLG-20260101-bbbb', entries=['merged:' + 'c' * 40]),
+                               state=claimed['state'], issues=issues, edges=claimed['edges'], now=NOW))
+        issues = merged_into(issues, merged['writes'])
+        bbbb = row_of(issues, 'BKLG-20260101-bbbb')
+        self.assertEqual(bbbb['fields']['status'], 'working')            # the claim itself stays
+        self.assertEqual(bbbb['fields']['claimed_by'], 'seat')
+        record = type('R', (), {'fm': bbbb['fields']})()
+        self.assertEqual(policy.merged_commit(record), 'c' * 40)
+        now = policy.parse_timestamp(NOW)
+        self.assertEqual(policy.claim(record, now)[0], 'live')
+        self.assertFalse(policy.blocks_scope(record, now))
+        taken = evaluate(dict(request=racer, state=merged['state'], issues=issues, edges=merged['edges'], now=NOW))
+        cccc = row_of(merged_into(issues, taken['writes']), 'BKLG-20260101-cccc')
+        self.assertEqual(cccc['fields']['claimed_by'], 'seat2')
+
     def test_edit_requires_authored_revision_and_keeps_full_revision(self):
         with self.assertRaisesRegex(Refused, 'authored revision'):
             self.call('edit', expected_authored_revision=0, body='changed')
