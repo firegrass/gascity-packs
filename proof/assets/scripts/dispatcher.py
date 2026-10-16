@@ -642,22 +642,33 @@ def dispatch(city, policy, said, dry_run):
                             said.say("held:" + item["id"], "skip %s: %s" % (item["id"], still))
                             continue
                         held.pop(item["id"], None)
-                        if dry_run:                  # no claim is made, so ask the claim's own rule without claiming
-                            patterns = [entry.split(':', 1)[1] for entry in item['writeScope'] if ':' in entry]
-                            added = test_companions.related(companion_files, patterns, cfg.get('test_companion_import_depth', 1))
-                            holder = overlapping(backlog, frontier, item, [(repo, path) for path in added], batch)
-                            if holder:
-                                said.say("claim:" + item["id"], "claim would be refused for %s: write scope overlaps active "
-                                         "claim %s" % (item["id"], holder))
+                        # Ask the claim's own rule BEFORE claiming, in both modes. The
+                        # ledger claim is still the authority and is still asked for every
+                        # item this lets through; this only spares the ledger a round trip
+                        # whose answer the frontier already holds. Under the Beads authority
+                        # a refused `next_work.py --claim` costs about 30 s (the corpus load
+                        # and the transaction) against 2 s under Git, and the dispatcher
+                        # holds the factory lock throughout: on 2026-10-15, 21 of the 22
+                        # liskov-rs candidates collided with one live claim on the shared
+                        # crate-boundary registry, a pass ran past its interval, four passes
+                        # overlapped, and the completer's landings were skipped for want of
+                        # the lock.
+                        patterns = [entry.split(':', 1)[1] for entry in item['writeScope'] if ':' in entry]
+                        added = test_companions.related(companion_files, patterns, cfg.get('test_companion_import_depth', 1))
+                        holder = overlapping(backlog, frontier, item, [(repo, path) for path in added], batch)
+                        if holder:
+                            said.say("claim:" + item["id"], "claim %s for %s: write scope overlaps active claim %s"
+                                     % ("would be refused" if dry_run else "not sent", item["id"], holder))
+                            continue
+                        if dry_run:                  # no claim is made
+                            item['writeScope'] = list(item['writeScope']) + [repo + ':' + path for path in added]
+                            batch.append(item)
+                            if level:
+                                live_free = live_room = False
                             else:
-                                item['writeScope'] = list(item['writeScope']) + [repo + ':' + path for path in added]
-                                batch.append(item)
-                                if level:
-                                    live_free = live_room = False
-                                else:
-                                    ordinary += 1
-                                if added:
-                                    fl.log(ME, '%s would include companion tests at %s: %s' % (item['id'], companion_sha[:10], ', '.join(added)))
+                                ordinary += 1
+                            if added:
+                                fl.log(ME, '%s would include companion tests at %s: %s' % (item['id'], companion_sha[:10], ', '.join(added)))
                             continue
                         if not writing:
                             writes.enter_context(fl.backlog_write(city))
