@@ -154,6 +154,11 @@ When the authority is `beads`, the dispatcher refuses new admissions unless this
   events have `id: null` and `before`/`after` = the coordination state. `activate` requires `shadow`,
   `freeze` requires `live`. Every event also carries `ledger_revision`, the total order for `history`.
 - `evidence` is allowed only on backlog items in `working`/`done`.
+- `evidence` is outside the semantic digest (pack 0.43.1, 2026-10-16): the digest covers the task's fields and
+  body minus `status`, the claim keys, `last_reviewed` and `evidence`. A row stamped under the earlier formula
+  (with `evidence`) is accepted on read and served under the current one; its stored stamp is rewritten on its next
+  mutation. Before this, the completer's own `merged:<sha>` evidence write (0.43.0) changed the digest it later
+  presented, and every completion after a merge was refused.
 - Thin-client CLI: structured fields travel in `--request-file`; `--id/--by/--hours/--repos/--lease` flags
   win over the file; the client fills `epoch` and `operation_id` when absent. `next_work.py --claim` under
   Beads prints one line containing `lease <lease_id>`.
