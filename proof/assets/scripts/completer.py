@@ -911,6 +911,28 @@ def main(argv):
         said.close()
 
 
+def record_merged(backlog, rig, p, pr, city, dry_run):
+    """Tell the work ledger the packet's pull request merged, once.
+
+    `merged:<sha>` as an evidence entry on the working item: the claim stays
+    (done waits for a green main, ADR-0115) but the policy's `blocks_scope`
+    stops it excluding other packets from its write scope the moment the code
+    is on main (BKLG-20261016-dk56). The bead stamp `proof.merged` keeps the
+    entry from being sent again; a refusal is logged and the pass goes on."""
+    sha = (pr.get("mergeCommit") or {}).get("oid", "")
+    if not sha or p["md"].get("proof.merged") == sha or dry_run or not wa.beads(backlog):
+        return
+    seat = admit.SEAT_PREFIX + rig
+    try:
+        wa.client(backlog, "evidence", item=p["id"], by=seat, request={"entries": ["merged:" + sha]})
+    except fl.Refused as why:
+        fl.log(ME, "%s: the ledger refused the merged evidence — %s" % (p["id"], str(why)[-200:]))
+        return
+    wa.forget(backlog)
+    fl.set_bead(city, rig, p["bead"]["id"], proof__merged=sha)
+    fl.log(ME, "%s: merged as %s recorded in the work ledger; its claim no longer excludes" % (p["id"], sha[:10]))
+
+
 def complete(argv, city, dry_run):
     policy = fl.load_policy(city)
     rigs = admit.load_rigs(city)
@@ -958,6 +980,7 @@ def complete(argv, city, dry_run):
                     # Publication still owns its handoff; do not remove the
                     # original worktree between push and its receipt.
                     continue
+                record_merged(backlog, rig, p, pr, city, dry_run)
                 verdict, sha, detail = main_verdict(clone, slug, pr["mergeCommit"]["oid"], pr["mergedAt"],
                                                     policy["rigs"].get(rig), p, pr)
                 fl.log(ME, "%s: merged as %s; main %s at %s (%s)"

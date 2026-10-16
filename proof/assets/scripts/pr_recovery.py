@@ -26,6 +26,43 @@ FORMULA = "mol-proof-pr-recovery"
 ACTIVE = {"launching", "running", "escalated"}
 DEFAULTS = {"enabled": False, "rigs": [], "max_attempts": 2, "max_hours": 6}
 BUNDLE = "crates/slipway-policy-client-contract/bundle/policy-client-bundle.json"
+# Conflicts a repository-owned generator settles without a model's judgement:
+# each row is (repo, the conflicting paths it covers, the side to take before
+# regenerating, the generator commands, the paths to stage afterwards). The
+# generator reads the merged tree, so which side is taken first is immaterial
+# except for `Cargo.lock`, where main's lock plus `cargo update --workspace`
+# re-adds only the branch's own workspace entries (BKLG-20261016-dk56).
+REGENERABLE = (
+    ("liskov-rs", (BUNDLE,), "--ours",
+     ([sys.executable, "scripts/liskov/generate-policy-client-bundle.py", "--write"],),
+     (BUNDLE,
+      "crates/slipway-policy-client-contract/bundle/policy-client-contract.wasm.gz",
+      "crates/slipway-policy-client-contract/bundle/policy-client.cjs",
+      "crates/slipway-policy-client-contract/bundle/policy-client.d.ts",
+      "crates/slipway-policy-client-contract/bundle/policy-client-conformance.json")),
+    ("liskov-rs", ("scripts/liskov/services-cargo-metadata.json", "scripts/liskov/services-census.json"), "--ours",
+     ([sys.executable, "scripts/liskov/validate-services.py", "--write-metadata-fixture"],
+      [sys.executable, "scripts/liskov/validate-services.py", "--write-census"]),
+     ("scripts/liskov/services-cargo-metadata.json", "scripts/liskov/services-census.json")),
+    ("liskov-rs", ("Cargo.lock",), "--theirs",
+     (["cargo", "update", "--workspace"],),
+     ("Cargo.lock",)),
+)
+
+
+def regeneration_plan(repo, conflicts):
+    """The REGENERABLE rows that settle some of `conflicts`, and what is left.
+
+    A row applies when any of its paths conflicts (the generator rewrites the
+    whole set); a partial census conflict is still regenerated whole. The
+    remainder is the model's to resolve."""
+    rows = []
+    remaining = set(conflicts)
+    for row in REGENERABLE:
+        if row[0] == repo and remaining & set(row[1]):
+            rows.append(row)
+            remaining -= set(row[1])
+    return rows, sorted(remaining)
 
 
 def now():
@@ -352,8 +389,9 @@ def prepare(city, key):
         conflicts = git(work, "diff", "--name-only", "--diff-filter=U").splitlines()
         if out.returncode and not conflicts:
             raise fl.Refused("merge failed: " + out.stderr[-1000:])
+        _rows, left = regeneration_plan(r["admission"]["repo"], conflicts)
         print(json.dumps({"base": r["base"], "conflicts": conflicts,
-                          "generated_bundle": conflicts == [BUNDLE]}))
+                          "generated_bundle": conflicts == [BUNDLE], "regenerable_only": bool(conflicts) and not left}))
 
 
 def integrate(city, key):
@@ -368,17 +406,17 @@ def integrate(city, key):
     with workspace_lock.open("a") as guard:
         fcntl.flock(guard, fcntl.LOCK_EX)
         conflicts = git(work, "diff", "--name-only", "--diff-filter=U").splitlines()
-        if conflicts == [BUNDLE] and r["admission"]["repo"] == "liskov-rs":
-            git(work, "checkout", "--ours", "--", BUNDLE)
-            subprocess.run([sys.executable, "scripts/liskov/generate-policy-client-bundle.py", "--write"],
-                           cwd=work, check=True, timeout=7200)
-            git(work, "add", "--", BUNDLE,
-                "crates/slipway-policy-client-contract/bundle/policy-client-contract.wasm.gz",
-                "crates/slipway-policy-client-contract/bundle/policy-client.cjs",
-                "crates/slipway-policy-client-contract/bundle/policy-client.d.ts",
-                "crates/slipway-policy-client-contract/bundle/policy-client-conformance.json")
+        rows, _left = regeneration_plan(r["admission"]["repo"], conflicts)
+        regenerated = []
+        for _repo, paths, side, commands, outputs in rows:
+            conflicting = [path for path in paths if path in conflicts]
+            git(work, "checkout", side, "--", *conflicting)
+            for command in commands:
+                subprocess.run(command, cwd=work, check=True, timeout=7200)
+            git(work, "add", "--", *outputs)
+            regenerated.extend(conflicting)
         remaining = git(work, "diff", "--name-only", "--diff-filter=U").splitlines()
-        print(json.dumps({"remaining_source_conflicts": remaining}))
+        print(json.dumps({"regenerated": regenerated, "remaining_source_conflicts": remaining}))
 
 
 def publish(city, key):

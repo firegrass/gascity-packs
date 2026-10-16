@@ -56,6 +56,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import factory_lib as fl
+import proof_work_policy as work_policy
 import livetest_contract as lt
 import test_companions
 import work_authority as wa
@@ -175,7 +176,10 @@ def overlapping(backlog, frontier, item, extra_scopes=(), planned=()):
             _p, ofm, _b, _dm = admit.load_item(backlog, other["id"])
         except fl.Refused:
             continue
-        theirs = dm.write_scopes(type("Rec", (), {"fm": ofm})())
+        holder = type("Rec", (), {"fm": ofm})()
+        if work_policy.merged_commit(holder):
+            continue                      # merged: its code is on main, the claim no longer excludes
+        theirs = dm.write_scopes(holder)
         if mine and theirs and dm.claims_collide(mine, theirs):
             return other["id"]
     for other in planned:
