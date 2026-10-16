@@ -17,10 +17,17 @@ ADR-0236 (orchestrator `docs/decisions/adr/0236-typed-work-has-a-separate-dolt-a
   `pr_recovery.py`, `livetest_evidence.py`, `execution_contract.py`.
 - **Live machine facts** (never touched by builders; tests use disposable servers only):
   city `/home/patrick/projects/gascity/city`, Dolt sql-server 127.0.0.1:17494 user root (no TLS), data dir
-  `city/.beads/dolt/<db>`; execution DBs are 3-letter prefixes (hq, lrs, orc, doc, …). The project ledger will be
+  `city/.beads/dolt/<db>`; execution DBs are 3-letter prefixes (hq, lrs, orc, doc, …). The project ledger is
   database `proof_work`, workspace dir `/home/patrick/projects/gascity/proof-work/.beads` (bd prefix `pw`), NOT a rig.
   The orchestrator git remote is `git@github.com:proof-computer/liskov-agent-orchestrator.git`; replication ref
   `refs/dolt/liskov-work-beads`.
+  **Direction (orchestrator ADR-0239, 2026-10-16):** the ledger moves to its own `dolt sql-server` on the owner's
+  workstation, bound to the tailnet with one SQL user per engineer and machine, and is shared by several factories;
+  city and rig stores are never shared. The seat becomes `gascity/<factory>/<rig>` (`<factory>` = the city's
+  `workspace_name`), a `factory` routing field pins a record to one factory, and the helper refuses ledger writes
+  carrying an absolute path, a session name or a key outside the allowlist. The `workspace`/`helper` paths in
+  `gascity/work-authority.json` are per-machine facts. These are contract changes for M2 of the orchestrator's
+  start-here plan; until they land, the seat and the allowlist are as written below.
 
 ## Helper invocation
 
