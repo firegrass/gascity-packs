@@ -1,8 +1,12 @@
 # PROOF pack
 
 PROOF agents, formulas, validation commands and deterministic factory scripts.
-The existing factory continues to use its Git work authority. Model choices,
-permissions and recovery behavior are preserved from the orchestrator pack.
+Since CUTOVER 1 (2026-10-15) the factory's work authority is the `proof_work`
+Beads ledger, written only by this pack's Go helper; under orchestrator
+ADR-0239 (2026-10-16) that ledger is hosted once and shared between several
+engineers' factories, while every city and rig store stays on its own machine.
+Model choices, permissions and recovery behavior are preserved from the
+orchestrator pack.
 
 Cities importing the agents declare the `claude`, `codex` and `grok` provider
 aliases with `base = "builtin:<name>"`. Credentials and operator-specific
