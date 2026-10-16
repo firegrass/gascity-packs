@@ -343,10 +343,17 @@ def scopes_overlap(a, b):
 # policy-client bundle from `generate-policy-client-bundle.py --write`, and
 # `Cargo.lock` from Cargo (2026-10-16, BKLG-20261016-dk56). A merge conflict
 # on one is repaired by regenerating it (`pr_recovery.py integrate`).
+# `crate-boundaries.toml` is hand-written but, since liskov-rs #1772, no
+# packet edits its shared counter lines: a shrink or a stem removal is a
+# `[[lowers]]` table in the packet's own raise file, and what a packet still
+# touches in the registry is its own package row or its own stem's name,
+# distinct lines that merge cleanly (owner decision 2026-10-16). It keeps
+# routing the reviewer; it no longer serializes the rig.
 CONTENT_ADDRESSED_SCOPE_ROOTS = (
     ".sqlx",
     "Cargo.lock",
     "crates/slipway-policy-client-contract/bundle",
+    "scripts/liskov/crate-boundaries.toml",
     "scripts/liskov/services-cargo-metadata.json",
     "scripts/liskov/services-census.json",
 )

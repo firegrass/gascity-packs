@@ -95,11 +95,15 @@ class PolicyTests(unittest.TestCase):
              ('liskov-rs', 'crates/slipway-policy-client-contract/bundle/**')]
         self.assertTrue(policy.scopes_overlap(a, b))
         self.assertFalse(policy.claims_collide(a, b))
-        # The hand-written registry and inventories still serialize.
-        self.assertTrue(policy.claims_collide(a + [('liskov-rs', 'scripts/liskov/crate-boundaries.toml')],
-                                              b + [('liskov-rs', 'scripts/liskov/crate-boundaries.toml')]))
+        # The crate-boundary registry routes but no longer serializes (liskov-rs #1772:
+        # a packet's shrink lives in its own lowers file); the raise directory is per
+        # packet anyway. Hand-maintained inventories still serialize.
+        self.assertFalse(policy.claims_collide(a + [('liskov-rs', 'scripts/liskov/crate-boundaries.toml')],
+                                               b + [('liskov-rs', 'scripts/liskov/crate-boundaries.toml')]))
         self.assertTrue(policy.claims_collide(a + [('liskov-rs', 'scripts/liskov/application-persistence-inventory.tsv')],
                                               b + [('liskov-rs', 'scripts/liskov/application-persistence-inventory.tsv')]))
+        self.assertTrue(policy.claims_collide(a + [('liskov-rs', 'scripts/liskov/policy-dispatch-census-baseline.json')],
+                                              b + [('liskov-rs', 'scripts/liskov/policy-dispatch-census-baseline.json')]))
 
     def test_a_merged_claim_no_longer_excludes_its_write_scope(self):
         def merged_into(issues, writes):
