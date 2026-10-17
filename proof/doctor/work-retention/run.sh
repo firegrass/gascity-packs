@@ -37,7 +37,7 @@ for o in (doc["config"].get("Orders") or {}).get("Overrides") or []:
     exit 0
   fi
   if [ -n "$resolved" ]; then
-    for name in LISKOV_WORK_WORKSPACE LISKOV_WORK_REMOTE LISKOV_WORK_REF LISKOV_WORK_REMOTE_NAME LISKOV_WORK_BACKUP_ROOT LISKOV_WORK_COMPACTOR_ORDER; do
+    for name in LISKOV_WORK_WORKSPACE LISKOV_WORK_DATA_DIR LISKOV_WORK_MAX_JOURNAL_BYTES LISKOV_WORK_REMOTE LISKOV_WORK_REF LISKOV_WORK_REMOTE_NAME LISKOV_WORK_BACKUP_ROOT LISKOV_WORK_COMPACTOR_ORDER; do
       value="$(printf '%s' "$resolved" | python3 -c 'import json, sys; print(json.load(sys.stdin).get(sys.argv[1], ""))' "$name")"
       [ -n "$value" ] && export "$name=$value"
     done
