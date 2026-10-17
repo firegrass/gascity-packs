@@ -21,10 +21,21 @@ import json, sys
 doc = json.load(sys.stdin)
 for o in (doc["config"].get("Orders") or {}).get("Overrides") or []:
     env = o.get("Env") or {}
-    if o.get("Name") == "proof-work-doctor" and env.get("LISKOV_WORK_WORKSPACE"):
+    if o.get("Name") != "proof-work-doctor":
+        continue
+    # ADR-0239 decision 7: the ledger is maintained on one factory; every other
+    # city disables the three proof-work-* orders by override.
+    if o.get("Enabled", o.get("enabled")) is False:
+        print("DISABLED")
+        break
+    if env.get("LISKOV_WORK_WORKSPACE"):
         print(json.dumps(env))
         break
 ' 2>/dev/null)"
+  if [ "$resolved" = "DISABLED" ]; then
+    echo "ledger maintenance runs on another factory (proof-work-doctor is disabled by override in this city)"
+    exit 0
+  fi
   if [ -n "$resolved" ]; then
     for name in LISKOV_WORK_WORKSPACE LISKOV_WORK_REMOTE LISKOV_WORK_REF LISKOV_WORK_REMOTE_NAME LISKOV_WORK_BACKUP_ROOT LISKOV_WORK_COMPACTOR_ORDER; do
       value="$(printf '%s' "$resolved" | python3 -c 'import json, sys; print(json.load(sys.stdin).get(sys.argv[1], ""))' "$name")"

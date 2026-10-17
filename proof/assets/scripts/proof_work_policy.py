@@ -503,6 +503,8 @@ def frontier(corpus, now=None):
             "blockers": blockers(corpus, r),
             "claim": state,
             "claimDetail": detail,
+            "claimedBy": fm.get("claimed_by"),
+            "factory": fm.get("factory"),
             "capacityBlocker": epic_start_blocker(corpus, r, wip),
             "wave": layer.get(rid),
         }

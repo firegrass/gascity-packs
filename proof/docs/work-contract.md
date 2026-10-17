@@ -15,12 +15,15 @@ ADR-0236 (orchestrator `docs/decisions/adr/0236-typed-work-has-a-separate-dolt-a
   `scripts/backlog_web.py`, Rust browser `backlog-web/`.
 - **Factory clients** in the pack: `dispatcher.py`, `admit.py`, `completer.py`, `keeper.py`, `status.py`,
   `pr_recovery.py`, `livetest_evidence.py`, `execution_contract.py`.
-- **Live machine facts** (never touched by builders; tests use disposable servers only):
-  city `/home/patrick/projects/gascity/city`, Dolt sql-server 127.0.0.1:17494 user root (no TLS), data dir
-  `city/.beads/dolt/<db>`; execution DBs are 3-letter prefixes (hq, lrs, orc, doc, …). The project ledger will be
-  database `proof_work`, workspace dir `/home/patrick/projects/gascity/proof-work/.beads` (bd prefix `pw`), NOT a rig.
-  The orchestrator git remote is `git@github.com:proof-computer/liskov-agent-orchestrator.git`; replication ref
-  `refs/dolt/liskov-work-beads`.
+- **Live machine facts** (never touched by builders; tests use disposable servers only). Since 2026-10-16
+  (ADR-0239 M1) the ledger `proof_work` is served by its own `dolt sql-server` on the owner's workstation,
+  tailnet address `100.84.172.0:3307` (no TLS; Tailscale encrypts in transit), one SQL user per engineer and
+  machine (`proof_work_p620` on the host itself), data dir `~/projects/gascity/proof-work-ledger/data`, bd
+  prefix `pw`; it is NOT a rig and is never inside a city's data dir. Each factory's workspace dir
+  (`~/projects/gascity/proof-work/.beads` on the host) names the host, port and user in `metadata.json`.
+  The city's managed Dolt server (`127.0.0.1:17494`, user root, the execution DBs with 3-letter prefixes hq,
+  lrs, orc, doc, …) is a different process and is never exposed. The orchestrator git remote is
+  `git@github.com:proof-computer/liskov-agent-orchestrator.git`; replication ref `refs/dolt/liskov-work-beads`.
 
 ## Helper invocation
 
@@ -38,7 +41,32 @@ Coordination bead `pw-coordination` metadata (the "state"):
 Every request carries `epoch` (string) and is refused on mismatch (except `import` on an empty workspace).
 Every mutation carries `operation_id` (1–128 bytes, unique per logical operation; replay with the same
 request digest returns the stored receipt; same id with a different request is refused) and `actor` (string;
-`gascity/<rig>` is a factory seat, anything else is a person).
+`gascity/<factory>/<rig>` is a factory seat — `<factory>` the city's workspace name, `<rig>` the clone that
+runs the packet (ADR-0239 decision 4) — anything not under `gascity/` is a person). A claim by a two-part
+`gascity/<rig>` seat (pack releases before 0.44.0) is refused; claims that already carry one finish as they are,
+and the pack's clients treat such a holder as their own for `<rig>` (`admit.held_by_us`).
+
+**Portability (ADR-0239 decision 5, pack 0.44.0).** The ledger holds portable facts only. Every mutation except
+`import` and `activate` is walked before any policy runs and refused, committing nothing, when it carries: a
+string containing `/home/` (an absolute machine path); a string matching `[a-z0-9-]+__[a-z][a-z0-9-]*` (a Gas
+City session name such as `proof__worker-pr-x` — person actors such as `claude-83o6` pass); a dict key starting
+`gc.` at any depth (an execution key); a top-level request key outside the action's set below; or, on `author`,
+`edit` and `answer`, a `fields` key outside the record-type registry (`proof_work_records.REGISTERED_FIELDS`,
+the orchestrator's `docs_model.ALLOWED_KEYS` plus `factory`). Bodies are prose and are not walked (`body` on
+edit/answer, `record(s)[].body` on author). A receipt replay (same operation id, same request) is answered by the
+helper without the evaluator; it can only replay a write that passed.
+
+Per-action request keys (besides `action`, `epoch`, `operation_id`, `actor`): claim `id, hours?, repos?`;
+renew `id, lease_id, hours?`; release `id, lease_id`; edit `id, expected_authored_revision, fields, body?`;
+answer `id, expected_authored_revision, body, fields?`; evidence `id, entries, receipts?`; complete `id,
+lease_id, expected_semantic_digest, resolution, evidence, close_epic?, notes?`; reopen `id, reason`; author
+`record | records`; freeze `reason`.
+
+**Routing (ADR-0239 decision 4).** A backlog item may carry `factory: <name>` (one path segment: letters,
+digits, `.`, `_`, `-`). A claim by a factory seat whose factory differs is refused (`pinned to factory <name>`);
+a person is not routed. `factory` is outside the semantic digest; `edit` may add it to an unclaimed item (it is
+the one field `edit` may add). The frontier rows carry `factory` and `claimedBy`; the dispatcher skips a record
+pinned elsewhere before claiming.
 
 Mutation results always include:
 `{id, bead_id, status, lease_id|null, authored_revision, operational_revision, semantic_digest, epoch,
@@ -78,8 +106,9 @@ New mutations:
   (dedup, order kept), operational revision +1, event kind `evidence` carrying `receipts` verbatim. Allowed on
   working or done items (a done item's evidence may grow; nothing else changes).
 - `complete {id, actor, lease_id, expected_semantic_digest, resolution:"done"|"superseded",
-  evidence:{pull_request?, merge_sha?, main_sha?, approved_tree?, attempts:[{bead_id, rig, session_id?,
-  outcome?}…], acceptance:{…}}, close_epic?:bool, notes?:str}`
+  evidence:{pull_request?, merge_sha?, main_sha?, approved_tree?, attempts:[{bead_id, rig, factory?, root?,
+  outcome?}…], acceptance:{…}}, close_epic?:bool, notes?:str}` (an attempt never names a session or a path;
+  the portability guard refuses one that does)
   - backlog items and questions-as-work are completed only from `working` by the claim holder with a live
     lease (`lease_id` must match; expired lease refuses); `expected_semantic_digest` must equal the row's
     current semantic digest (the contract the attempt executed).

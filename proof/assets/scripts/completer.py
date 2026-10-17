@@ -277,9 +277,8 @@ def renew_open(city, policy, backlog, waiting, dry_run, now=None):
         wa.forget(backlog)
     candidates = []
     for rig, p, pr in waiting:
-        seat = admit.SEAT_PREFIX + rig
         fm = item_fields(backlog, p["id"])
-        if not isinstance(fm, dict) or fm.get("claimed_by") != seat or fm.get("status") != "working":
+        if not isinstance(fm, dict) or not admit.held_by_us(fm.get("claimed_by"), rig) or fm.get("status") != "working":
             continue                                        # not ours to hold
         expires, opened = dm.parse_timestamp(fm.get("claim_expires")), dm.parse_timestamp(pr.get("createdAt"))
         if expires is None or opened is None:
@@ -318,7 +317,7 @@ def renew_open(city, policy, backlog, waiting, dry_run, now=None):
         with fl.backlog_write(city):
             renewed = []
             for rig, p, pr, was in candidates:
-                seat = admit.SEAT_PREFIX + rig
+                seat = admit.seat(rig)
                 out = fl.sh([sys.executable, "scripts/next_work.py", "--renew", p["id"], "--by", seat,
                              "--hours", str(policy["claim_hours"])], cwd=backlog)
                 if out.returncode == 0:
@@ -373,10 +372,19 @@ def item_fields(backlog, item_id):
     return dm.split_frontmatter(open(files[0], encoding="utf-8").read())[0] if len(files) == 1 else None
 
 
+def holder_of(backlog, rig, item_id):
+    """The seat string the ledger row names for an item this factory holds
+    (this factory's seat, or the two-part one of an older claim); '' when the
+    row is not ours."""
+    row = wa.row(backlog, item_id) or {}
+    holder = (row.get("fields") or {}).get("claimed_by") or ""
+    return holder if admit.held_by_us(holder, rig) else ""
+
+
 def renew_lease(city, backlog, rig, packet, hours, why):
     """Renew a factory seat's lease on `packet`'s item through the client
     (Beads). A changed lease id is recorded back on the execution bead."""
-    seat = admit.SEAT_PREFIX + rig
+    seat = holder_of(backlog, rig, packet["id"]) or admit.seat(rig)
     lease = wa.lease_of(backlog, packet["id"], seat, packet["md"])
     if not lease:
         fl.log(ME, "could not renew %s: no lease for %s in the ledger" % (packet["id"], seat))
@@ -398,7 +406,7 @@ def renew_lease(city, backlog, rig, packet, hours, why):
 def release_lease(backlog, rig, packet):
     """Release a factory seat's lease through the client (Beads). Returns the
     operation id of the release, or '' when it was refused."""
-    seat = admit.SEAT_PREFIX + rig
+    seat = holder_of(backlog, rig, packet["id"]) or admit.seat(rig)
     lease = wa.lease_of(backlog, packet["id"], seat, packet["md"])
     if not lease:
         fl.log(ME, "could not release %s: no lease for %s in the ledger" % (packet["id"], seat))
@@ -431,9 +439,8 @@ def release_stopped(city, policy, rigs, backlog, dry_run):
         wa.forget(backlog)
     candidates = []
     for rig, p in stopped:
-        seat = admit.SEAT_PREFIX + rig
         fm = item_fields(backlog, p["id"])
-        if not isinstance(fm, dict) or fm.get("claimed_by") != seat or fm.get("status") != "working":
+        if not isinstance(fm, dict) or not admit.held_by_us(fm.get("claimed_by"), rig) or fm.get("status") != "working":
             if not dry_run:                                  # already released, completed or re-claimed: theirs
                 fl.set_bead(city, rig, p["bead"]["id"], proof__released="not-ours")
             continue
@@ -458,7 +465,7 @@ def release_stopped(city, policy, rigs, backlog, dry_run):
         with fl.backlog_write(city):
             released = []
             for rig, p in candidates:
-                seat = admit.SEAT_PREFIX + rig
+                seat = admit.seat(rig)
                 out = fl.sh([sys.executable, "scripts/next_work.py", "--release", p["id"], "--by", seat], cwd=backlog)
                 if out.returncode == 0:
                     released.append((rig, p))
@@ -760,7 +767,7 @@ def completion_evidence(city, rig, p, pr, sha):
     merged pull request, its merge commit, the green main head, the tree the
     reviewer approved, and the attempt that produced it."""
     root_md = (p.get("root") or {}).get("metadata") or {}
-    attempt = {"bead_id": p["bead"]["id"], "rig": rig}
+    attempt = {"bead_id": p["bead"]["id"], "rig": rig, "factory": admit.factory_name()}
     if p.get("root", {}).get("id"):
         attempt["root"] = p["root"]["id"]
     if root_md.get("gc.outcome"):
@@ -802,12 +809,12 @@ def complete_in_ledger(city, policy, rigs, backlog, ready, dm, today):
     wa.forget(backlog)
     done, not_ours = [], []
     for rig, p, pr, sha in ready:
-        seat = admit.SEAT_PREFIX + rig
         fm = item_fields(backlog, p["id"])
-        if not isinstance(fm, dict) or fm.get("status") != "working" or fm.get("claimed_by") != seat:
+        if not isinstance(fm, dict) or fm.get("status") != "working" or not admit.held_by_us(fm.get("claimed_by"), rig):
             fl.log(ME, "%s is not `working` for this seat in the work ledger; leaving the item alone" % p["id"])
             not_ours.append((rig, p))
             continue
+        seat = fm["claimed_by"]                      # the holder: this factory's seat, or an older two-part one
         lease = wa.lease_of(backlog, p["id"], seat, p["md"])
         if not lease:
             fl.log(ME, "%s: no lease for %s in the ledger; not completed" % (p["id"], seat))
@@ -922,7 +929,7 @@ def record_merged(backlog, rig, p, pr, city, dry_run):
     sha = (pr.get("mergeCommit") or {}).get("oid", "")
     if not sha or p["md"].get("proof.merged") == sha or dry_run or not wa.beads(backlog):
         return
-    seat = admit.SEAT_PREFIX + rig
+    seat = holder_of(backlog, rig, p["id"]) or admit.seat(rig)
     try:
         wa.client(backlog, "evidence", item=p["id"], by=seat, request={"entries": ["merged:" + sha]})
     except fl.Refused as why:
@@ -1052,7 +1059,7 @@ def complete(argv, city, dry_run):
         # Only an item that is still OURS to complete can be held: one a person has
         # already completed falls through to the `not-ours` branch below, instead of
         # being announced as "held" on every pass for ever.
-        if record is None or record.status != "working" or record.fm.get("claimed_by") != admit.SEAT_PREFIX + rig:
+        if record is None or record.status != "working" or not admit.held_by_us(record.fm.get("claimed_by"), rig):
             continue
         epic = record.fm.get("parent_epic")
         if epic and not any(dm.record_id(other) not in finishing and other.fm.get("parent_epic") == epic
@@ -1083,7 +1090,7 @@ def complete(argv, city, dry_run):
                 text = open(files[0], encoding="utf-8").read() if len(files) == 1 else ""
                 fm = dm.split_frontmatter(text)[0] if text else None
                 if not isinstance(fm, dict) or fm.get("status") != "working" \
-                        or fm.get("claimed_by") != admit.SEAT_PREFIX + rig:
+                        or not admit.held_by_us(fm.get("claimed_by"), rig):
                     # Someone else already completed, released or re-claimed it. Theirs.
                     fl.log(ME, "%s is not `working` for this seat on main; leaving the item alone" % p["id"])
                     not_ours.append((rig, p))

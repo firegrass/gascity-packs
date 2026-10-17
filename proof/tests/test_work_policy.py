@@ -217,7 +217,7 @@ class Ledger:
                                             storage_class='versioned')
         return out
 
-    def act(self, action, actor='gascity/lrs', rid='BKLG-20260101-bbbb', op=None, **kwargs):
+    def act(self, action, actor='gascity/t/lrs', rid='BKLG-20260101-bbbb', op=None, **kwargs):
         request = dict(action=action, epoch='test', actor=actor, operation_id=op or action + '-' + str(len(self.issues)), **kwargs)
         if rid is not None:
             request['id'] = rid
@@ -238,10 +238,10 @@ class ActionTests(unittest.TestCase):
     def snapshot(self):
         return rows_by_id(self.ledger.do(dict(action='snapshot', epoch='test')))
 
-    def claim(self, rid='BKLG-20260101-bbbb', actor='gascity/lrs'):
+    def claim(self, rid='BKLG-20260101-bbbb', actor='gascity/t/lrs'):
         return self.ledger.act('claim', actor=actor, rid=rid)['result']
 
-    def complete(self, rid='BKLG-20260101-bbbb', actor='gascity/lrs', **overrides):
+    def complete(self, rid='BKLG-20260101-bbbb', actor='gascity/t/lrs', **overrides):
         row = self.snapshot()[rid]
         if not (row['fields']['status'] == 'working' and row['fields'].get('claimed_by') == actor):
             row = self.claim(rid, actor)
@@ -418,6 +418,7 @@ class ActionTests(unittest.TestCase):
     def item(self, code='dddd', **overrides):
         fields = dict(self.ledger.rows[-1]['fields'])
         fields.pop('created'); fields.pop('last_reviewed')
+        fields.pop('extra_legacy')          # imports keep unknown legacy keys; an author may not add one
         fields.update(write_scope=['synthetic:src/other.py'], rank='5', **overrides)
         return dict(id=f'BKLG-20260101-{code}', path=f'docs/backlog/items/BKLG-20260101-{code}-new.md',
                     fields=fields, body='\n## Acceptance\n\nNew.\n')
@@ -613,6 +614,189 @@ class EvidenceOutsideTheContract(unittest.TestCase):
         self.ledger.issues[bead_id(rid)]['metadata']['proof']['semantic_digest'] = '0' * 64
         with self.assertRaisesRegex(Refused, 'semantic digest mismatch'):
             self.ledger.do(dict(action='snapshot', epoch='test'))
+
+
+A, B = 'gascity/a/lrs', 'gascity/b/lrs'      # two factories, one rig name each (ADR-0239 decision 4)
+MERGED = dict(pull_request=PR, main_sha='b' * 40, attempts=[dict(bead_id='lrs-1', rig='lrs', factory='a')])
+
+
+def disjoint():
+    rows = fixture()
+    for row in rows:
+        if row['id'] == 'BKLG-20260101-cccc':
+            row['fields']['write_scope'] = ['synthetic:src/other.py']
+            row['semantic_digest'] = digest(semantic(row['fields'], row['body']))
+    return rows
+
+
+class FactoryRouting(unittest.TestCase):
+    """One shared frontier, several factories: the ledger claim is the only
+    cross-factory lock, the seat names the factory, and a record may be
+    pinned to one of them."""
+
+    def setUp(self):
+        self.ledger = Ledger(disjoint(), reservations_reconciled=True)
+
+    def snapshot(self):
+        return rows_by_id(self.ledger.do(dict(action='snapshot', epoch='test')))
+
+    def frontier(self):
+        return self.ledger.do(dict(action='snapshot', epoch='test'))['result']['frontier']
+
+    def test_two_factories_claim_one_frontier(self):
+        first = self.ledger.act('claim', actor=A)['result']
+        self.assertEqual(self.snapshot()['BKLG-20260101-bbbb']['fields']['claimed_by'], A)
+        with self.assertRaisesRegex(Refused, 'work is not ready'):
+            self.ledger.act('claim', actor=B)                         # the same record, already held by a
+        second = self.ledger.act('claim', actor=B, rid='BKLG-20260101-cccc')['result']
+        self.assertNotEqual(first['lease_id'], second['lease_id'])
+        claimed = {row['id']: row for row in self.frontier()['claimed']}
+        self.assertEqual(claimed['BKLG-20260101-bbbb']['claimedBy'], A)
+        self.assertEqual(claimed['BKLG-20260101-cccc']['claimedBy'], B)
+        self.assertIsNone(claimed['BKLG-20260101-bbbb']['factory'])
+        # Each factory settles only its own claim: the lease and the holder are checked together.
+        with self.assertRaisesRegex(Refused, 'belongs to another actor'):
+            self.ledger.act('release', actor=B, lease_id=first['lease_id'])
+        with self.assertRaisesRegex(Refused, 'belongs to another actor'):
+            self.ledger.act('complete', actor=B, lease_id=first['lease_id'], expected_semantic_digest=first['semantic_digest'],
+                            resolution='done', evidence=MERGED)
+        done = self.ledger.act('complete', actor=A, lease_id=first['lease_id'], expected_semantic_digest=first['semantic_digest'],
+                               resolution='done', evidence=MERGED)['result']
+        self.assertEqual(done['status'], 'done')
+
+    def test_a_pinned_record_is_refused_to_every_other_factory(self):
+        rid = 'BKLG-20260101-cccc'
+        pinned = self.ledger.act('edit', actor='patrick', rid=rid, expected_authored_revision=1, fields=dict(factory='a'))['result']
+        self.assertEqual(self.snapshot()[rid]['fields']['factory'], 'a')
+        self.assertEqual([r['factory'] for r in self.frontier()['ready'] if r['id'] == rid], ['a'])
+        with self.assertRaisesRegex(Refused, 'pinned to factory a; gascity/b/lrs may not claim it'):
+            self.ledger.act('claim', actor=B, rid=rid)
+        with self.assertRaisesRegex(Refused, 'a factory seat is gascity/<factory>/<rig>'):
+            self.ledger.act('claim', actor='gascity/lrs', rid=rid)   # the pre-0.44.0 seat has no factory
+        self.assertEqual(self.snapshot()[rid]['fields']['status'], 'open')
+        taken = self.ledger.act('claim', actor=A, rid=rid)['result']
+        self.assertEqual(taken['status'], 'working')
+        self.ledger.act('release', actor=A, rid=rid, lease_id=taken['lease_id'])
+        person = self.ledger.act('claim', actor='patrick', rid=rid)['result']      # people are not routed
+        self.assertEqual(person['status'], 'working')
+
+    def test_routing_is_outside_the_semantic_digest_and_cannot_change_under_a_claim(self):
+        rid = 'BKLG-20260101-cccc'
+        before = self.snapshot()[rid]['semantic_digest']
+        self.ledger.act('edit', actor='patrick', rid=rid, expected_authored_revision=1, fields=dict(factory='a'))
+        self.assertEqual(self.snapshot()[rid]['semantic_digest'], before)
+        claimed = self.ledger.act('claim', actor=A, rid=rid)['result']
+        with self.assertRaisesRegex(Refused, 'release retained claim'):
+            self.ledger.act('edit', actor='patrick', rid=rid, expected_authored_revision=2, fields=dict(factory='b'))
+        self.assertEqual(claimed['semantic_digest'], before)
+
+    def test_a_pin_must_be_one_path_segment_and_only_an_item_takes_one(self):
+        with self.assertRaisesRegex(Refused, 'invalid factory routing'):
+            self.ledger.act('edit', actor='patrick', rid='BKLG-20260101-cccc', expected_authored_revision=1, fields=dict(factory='a/b'))
+        with self.assertRaisesRegex(Refused, 'schema registration: factory'):
+            self.ledger.act('edit', actor='patrick', rid='EPIC-20260101-aaaa', expected_authored_revision=1, fields=dict(factory='a'))
+
+    def test_a_new_two_part_factory_claim_is_refused_but_an_existing_one_finishes(self):
+        legacy = 'gascity/lrs'
+        with self.assertRaisesRegex(Refused, 'a factory seat is gascity/<factory>/<rig>'):
+            self.ledger.act('claim', actor=legacy)
+        # A claim made before 0.44.0 is already on the row; its holder still renews, releases and completes it.
+        issue = self.ledger.issues[bead_id('BKLG-20260101-bbbb')]
+        row = issue['metadata']['proof']
+        row['fields'].update(status='working', claimed_by=legacy, claimed_at='2026-10-14T17:00:00Z',
+                             claim_expires='2026-10-15T05:00:00Z')
+        row['lease_id'] = 'f' * 64
+        row['semantic_digest'] = digest(semantic(row['fields'], row['body']))
+        issue.update(status='in_progress', assignee=legacy)
+        epic = self.ledger.issues[bead_id('EPIC-20260101-aaaa')]
+        epic['metadata']['proof']['fields'].update(status='working', owner=legacy)
+        epic['metadata']['proof']['semantic_digest'] = digest(semantic(epic['metadata']['proof']['fields'], epic['metadata']['proof']['body']))
+        epic['status'] = 'in_progress'
+        renewed = self.ledger.act('renew', actor=legacy, lease_id='f' * 64, hours=2)['result']
+        self.assertEqual(renewed['status'], 'working')
+        done = self.ledger.act('complete', actor=legacy, lease_id='f' * 64, expected_semantic_digest=renewed['semantic_digest'],
+                               resolution='done', evidence=MERGED)['result']
+        self.assertEqual(done['status'], 'done')
+
+
+class PortabilityGuard(unittest.TestCase):
+    """ADR-0239 decision 5: a write carrying a machine path, a session name,
+    an execution key or a key outside the allowlist is refused before any
+    policy runs, so nothing of it reaches the shared ledger."""
+
+    def setUp(self):
+        self.ledger = Ledger(disjoint(), reservations_reconciled=True)
+        self.claimed = self.ledger.act('claim', actor=A)['result']
+
+    def complete(self, **overrides):
+        request = dict(lease_id=self.claimed['lease_id'], expected_semantic_digest=self.claimed['semantic_digest'],
+                       resolution='done', evidence=copy.deepcopy(MERGED))
+        request.update(overrides)
+        return self.ledger.act('complete', actor=A, **request)
+
+    def test_refuses_a_machine_path_anywhere_but_in_a_body(self):
+        with self.assertRaisesRegex(Refused, r'portability: absolute path in evidence\.attempts\.0\.root: /home/'):
+            self.complete(evidence=dict(MERGED, attempts=[dict(bead_id='lrs-1', rig='lrs', root='/home/patrick/x')]))
+        with self.assertRaisesRegex(Refused, 'portability: absolute path in notes'):
+            self.complete(notes='worktree /home/patrick/projects/x')
+        with self.assertRaisesRegex(Refused, 'portability: absolute path in fields.validation.0'):
+            self.ledger.act('edit', actor='patrick', rid='BKLG-20260101-cccc', expected_authored_revision=1,
+                            fields=dict(validation=['python3 /home/patrick/t.py']))
+        # Prose is not walked: a body may name where something happened.
+        out = self.ledger.act('edit', actor='patrick', rid='BKLG-20260101-cccc', expected_authored_revision=1,
+                              body='Readback taken on /home/patrick/projects/gascity/city.\n')
+        self.assertEqual(out['result']['authored_revision'], 2)
+
+    def test_refuses_a_session_name_but_not_a_person(self):
+        with self.assertRaisesRegex(Refused, 'portability: session name in notes: run by proof__worker-pr-abc'):
+            self.complete(notes='run by proof__worker-pr-abc')
+        with self.assertRaisesRegex(Refused, 'portability: session name in receipts.session'):
+            self.ledger.act('evidence', actor=A, entries=['x'], receipts=dict(session='core__control-dispatcher-1'))
+        with self.assertRaisesRegex(Refused, 'portability: session name in actor'):
+            self.ledger.act('claim', actor='proof__worker-pr-abc', rid='BKLG-20260101-cccc')
+        person = self.ledger.act('claim', actor='claude-83o6', rid='BKLG-20260101-cccc')['result']
+        self.assertEqual(person['status'], 'working')
+
+    def test_refuses_execution_keys_and_keys_outside_the_contract(self):
+        with self.assertRaisesRegex(Refused, 'portability: execution key gc.outcome outside the allowlist at evidence'):
+            self.complete(evidence=dict(MERGED, **{'gc.outcome': 'pass'}))
+        with self.assertRaisesRegex(Refused, 'portability: execution key gc.session_id .* at evidence.attempts.0'):
+            self.complete(evidence=dict(MERGED, attempts=[dict(bead_id='lrs-1', rig='lrs', **{'gc.session_id': 'pr-1'})]))
+        with self.assertRaisesRegex(Refused, 'portability: request key outside the complete contract: session_id, work_dir'):
+            self.complete(work_dir='x', session_id='y')
+        with self.assertRaisesRegex(Refused, 'portability: request key outside the claim contract: repo'):
+            self.ledger.act('claim', actor=B, rid='BKLG-20260101-cccc', repo='liskov-rs')
+        with self.assertRaisesRegex(Refused, 'schema registration: brand_new'):
+            self.ledger.act('edit', actor='patrick', rid='BKLG-20260101-cccc', expected_authored_revision=1, fields=dict(brand_new='x'))
+        with self.assertRaisesRegex(Refused, 'schema registration: work_dir'):
+            self.ledger.act('author', actor='patrick', rid=None, record=dict(
+                id='BKLG-20260101-dddd', path='docs/backlog/items/BKLG-20260101-dddd-new.md', body='x',
+                fields=dict(doc_type='backlog', title='New', status='open', owner='unassigned', source_documents=[],
+                            confidence='high', related_repos=[], milestone='test', lane='delivery', gate='false',
+                            priority='p0', depends_on=[], parent_epic='EPIC-20260101-aaaa', work_dir='/tmp/x')))
+
+    def test_the_writes_the_pack_makes_today_pass(self):
+        # The completer's completion (completer.completion_evidence) and notes.
+        done = self.complete(evidence=dict(pull_request=PR, main_sha='b' * 40, merge_sha='c' * 40, approved_tree='d' * 40,
+                                           attempts=[dict(bead_id='lrs-7f3a', rig='lrs', factory='a', root='lrs-9b2c', outcome='pass')]),
+                             notes='Completed by the PROOF completer: %s merged as cccccccccc, main green at bbbbbbbbbb' % PR)
+        self.assertEqual(done['result']['status'], 'done')
+        # The merged-evidence write, the live-result publisher's receipts and acceptance.
+        self.ledger.act('evidence', actor=A, entries=['merged:' + 'c' * 40])
+        self.ledger.act('evidence', actor=A, entries=['../../raw/2026-10-16-live.md'],
+                        receipts=dict(kind='proof.liskov.livetest-publication.v1', run_id='e' * 32, report='pass',
+                                      commit='c' * 40, evidence_digest='f' * 64))
+        # A person authoring a packet with the registry's keys.
+        out = self.ledger.act('author', actor='patrick', rid=None, record=dict(
+            id='BKLG-20260101-dddd', path='docs/backlog/items/BKLG-20260101-dddd-new.md', body='Body.',
+            fields=dict(doc_type='backlog', title='New', status='open', owner='unassigned', source_documents=[],
+                        confidence='high', related_repos=[], milestone='test', lane='delivery', gate='false',
+                        priority='p0', depends_on=[], parent_epic='EPIC-20260101-aaaa', rank='3', timebox='2h',
+                        write_scope=['synthetic:src/new.py'], validation=['python3 test.py'], factory='a')))
+        self.assertEqual(out['result']['status'], 'open')
+        with self.assertRaisesRegex(Refused, 'pinned to factory a'):
+            self.ledger.act('claim', actor=B, rid='BKLG-20260101-dddd')
+
 
 if __name__ == '__main__':
     unittest.main()

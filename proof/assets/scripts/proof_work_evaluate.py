@@ -10,16 +10,47 @@ from datetime import timedelta
 import json
 import math
 from pathlib import PurePosixPath
+import re
 import sys
 
 import proof_work_policy as p
-from proof_work_records import (SCHEMA, Corpus, Refused, bead_id, decode, digest,
-                                encode, relationships, semantic, validate_corpus)
+from proof_work_records import (REGISTERED_FIELDS, SCHEMA, Corpus, Refused, bead_id, decode, digest,
+                                encode, factory_problem, relationships, semantic, validate_corpus)
 
+# A factory seat is `gascity/<factory>/<rig>` (ADR-0239 decision 4): the
+# factory is the city's workspace name, the rig the clone that runs the packet.
+# Anything not under the prefix is a person. The pack's `admit.seat()` builds
+# the string; these parse it without reading the city.
 FACTORY_SEAT_PREFIX = 'gascity/'
 READ_ONLY_ACTIONS = ('snapshot', 'history', 'revision')
 STATE_ACTIONS = ('activate', 'freeze')
 ROW_ACTIONS = ('claim', 'renew', 'release', 'edit', 'answer', 'evidence', 'complete', 'reopen')
+# ADR-0239 decision 5: the ledger holds portable facts only. Every write is
+# walked (bodies excepted: they are prose) and refused when it carries a
+# machine path, a Gas City session name, an execution (`gc.`) key, a request
+# key outside the contract's set for its action, or a record field outside
+# the registry. A receipt replay (same operation id, same request) is answered
+# by the helper without the evaluator; it can only replay a write that passed.
+PORTABILITY_ACTIONS = ROW_ACTIONS + ('author', 'freeze')
+MACHINE_PATH = '/home/'
+SESSION_NAME_RE = re.compile(r'[a-z0-9-]+__[a-z][a-z0-9-]*')   # proof__worker-pr-x, core__control-dispatcher-…
+EXECUTION_KEY_PREFIX = 'gc.'
+COMMON_KEYS = ('action', 'epoch', 'operation_id', 'actor')
+REQUEST_KEYS = {
+    'claim': ('id', 'hours', 'repos'),
+    'renew': ('id', 'lease_id', 'hours'),
+    'release': ('id', 'lease_id'),
+    'edit': ('id', 'expected_authored_revision', 'fields', 'body'),
+    'answer': ('id', 'expected_authored_revision', 'body', 'fields'),
+    'evidence': ('id', 'entries', 'receipts'),
+    'complete': ('id', 'lease_id', 'expected_semantic_digest', 'resolution', 'evidence', 'close_epic', 'notes'),
+    'reopen': ('id', 'reason'),
+    'author': ('record', 'records'),
+    'freeze': ('reason',),
+}
+# Prose that may name a machine: a record body, an answer, an edited body.
+PROSE_KEYS = ('body',)
+ROUTING_FIELDS = ('factory',)
 # Legacy roots a native author may create under, by record type.
 AUTHOR_ROOTS = {'backlog': ('docs/backlog/items/', 'BKLG'), 'epic': ('docs/backlog/epics/', 'EPIC'),
                 'question': ('docs/questions/open/', 'Q')}
@@ -38,6 +69,80 @@ LIFECYCLE_FIELDS = {'status', 'created', 'doc_type', 'epic_id', 'milestone_id', 
 
 def is_factory(actor):
     return actor.startswith(FACTORY_SEAT_PREFIX)
+
+
+def seat_factory(actor):
+    """The factory of a `gascity/<factory>/<rig>` seat; None for a person or
+    for the retired two-part `gascity/<rig>` seat."""
+    if not is_factory(actor):
+        return None
+    parts = actor[len(FACTORY_SEAT_PREFIX):].split('/')
+    return parts[0] if len(parts) == 2 and all(parts) else None
+
+
+def seat_rig(actor):
+    """The rig of a factory seat (either form); None for a person."""
+    if not is_factory(actor):
+        return None
+    parts = actor[len(FACTORY_SEAT_PREFIX):].split('/')
+    return parts[-1] if 1 <= len(parts) <= 2 and all(parts) else None
+
+
+def portability_guard(request):
+    """Refuse a write that would carry machine-local facts into the shared
+    ledger (ADR-0239 decision 5). Pure: it reads only the request."""
+    action = request.get('action')
+    if action not in PORTABILITY_ACTIONS:
+        return
+    allowed = set(COMMON_KEYS) | set(REQUEST_KEYS[action])
+    unknown = sorted(set(request) - allowed)
+    if unknown:
+        raise Refused('portability: request key outside the %s contract: %s' % (action, ', '.join(unknown)))
+    records = request.get('records') if action == 'author' and 'records' in request else None
+    for path, value in walk(request):
+        key = path[-1] if path else ''
+        if isinstance(value, dict):
+            bad = sorted(k for k in value if isinstance(k, str) and k.startswith(EXECUTION_KEY_PREFIX))
+            if bad:
+                raise Refused('portability: execution key %s outside the allowlist at %s' % (bad[0], dotted(path) or 'request'))
+            continue
+        if not isinstance(value, str) or is_prose(path, records is not None):
+            continue
+        if MACHINE_PATH in value:
+            raise Refused('portability: absolute path in %s: %s' % (dotted(path), value[:120]))
+        if SESSION_NAME_RE.search(value):
+            raise Refused('portability: session name in %s: %s' % (dotted(path), value[:120]))
+
+
+def registered(doc_type, fields):
+    """Refuse a field outside the registry for this record type."""
+    if not isinstance(fields, dict):
+        return
+    unknown = sorted(set(fields) - REGISTERED_FIELDS.get(doc_type, frozenset()))
+    if unknown:
+        raise Refused('new fields require schema registration: ' + ', '.join(unknown))
+
+
+def walk(value, path=()):
+    """Every (path, value) in a JSON document, parents before children."""
+    yield path, value
+    if isinstance(value, dict):
+        for key, child in value.items():
+            yield from walk(child, path + (str(key),))
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            yield from walk(child, path + (str(index),))
+
+
+def dotted(path):
+    return '.'.join(path)
+
+
+def is_prose(path, many):
+    """`body` at the top of an edit or answer, or a record's body on author."""
+    if not path or path[-1] not in PROSE_KEYS:
+        return False
+    return path == ('body',) or path == ('record', 'body') or (many and len(path) == 3 and path[0] == 'records')
 
 
 def today(now):
@@ -90,6 +195,7 @@ def evaluate(data):
     actor = request.get('actor')
     if not isinstance(actor, str) or not actor.strip():
         raise Refused('mutation requires actor')
+    portability_guard(request)
     mode = state.get('mode')
     if mode == 'frozen':
         raise Refused('authority is frozen; a new epoch needs a fresh import')
@@ -117,6 +223,11 @@ def evaluate(data):
     if action == 'claim':
         if record.doc_type != 'backlog' or not p.is_ready(corpus, record, now):
             raise Refused('work is not ready')
+        if is_factory(actor) and seat_factory(actor) is None:
+            raise Refused('a factory seat is gascity/<factory>/<rig>, got ' + actor)
+        pinned = fm.get('factory')
+        if pinned and is_factory(actor) and seat_factory(actor) != pinned:
+            raise Refused('pinned to factory %s; %s may not claim it' % (pinned, actor))
         repos = request.get('repos', [])
         if not isinstance(repos, list) or any(not isinstance(repo, str) or not repo for repo in repos):
             raise Refused('explicit repository reservations must be a list')
@@ -150,7 +261,8 @@ def evaluate(data):
             raise Refused('authored revision changed')
         if any(k in fm for k in p.CLAIM_KEYS):
             raise Refused('release retained claim before editing contract')
-        apply_field_updates(fm, request.get('fields', {}))
+        registered(record.doc_type, request.get('fields', {}))
+        apply_field_updates(fm, request.get('fields', {}), allow_new=ROUTING_FIELDS if record.doc_type == 'backlog' else ())
         if 'body' in request:
             row['body'] = request['body']
         authored = True
@@ -164,6 +276,7 @@ def evaluate(data):
             raise Refused('authored revision changed')
         if not isinstance(request.get('body'), str) or not request['body'].strip():
             raise Refused('an answer needs a body')
+        registered('question', request.get('fields', {}))
         apply_field_updates(fm, request.get('fields', {}), allow_new=QUESTION_ANSWER_FIELDS)
         fm['status'] = 'answered'
         fm.setdefault('answered', today(now))
@@ -317,6 +430,7 @@ def author(request, rows, state, corpus, now, actor, at, op):
         doc_type = fields.get('doc_type')
         if doc_type not in AUTHOR_ROOTS:
             raise Refused('author creates a backlog item, epic or question')
+        registered(doc_type, fields)
         root, prefix = AUTHOR_ROOTS[doc_type]
         name = PurePosixPath(path).name
         if (not path.startswith(root) or path != root + name or not name.endswith('.md')

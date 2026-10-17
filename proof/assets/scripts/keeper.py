@@ -56,6 +56,19 @@ def gc_json(*args, default):
         return default
 
 
+def claim_holder(backlog_clone, item_id):
+    """The seat string the ledger row names as the claim holder, or ''."""
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import work_authority as wa
+    try:
+        if not wa.beads(backlog_clone):
+            return ""
+        row = wa.row(backlog_clone, item_id) or {}
+    except Exception:  # noqa: BLE001 - a notice, never a crash
+        return ""
+    return str((row.get("fields") or {}).get("claimed_by") or "")
+
+
 def claim_expiry(backlog_clone, item_id):
     """When the item's claim ends: from its file under Git, from the client
     snapshot's row under Beads (ADR-0236) — never a Markdown read then."""
@@ -99,7 +112,11 @@ def renew_lease(backlog_clone, rig, bead, pid):
     import work_authority as wa
     if not wa.beads(backlog_clone) or wa.frozen(backlog_clone):
         return None
-    seat = "gascity/" + rig
+    from factory_lib import admit
+    row = wa.row(backlog_clone, pid) or {}
+    seat = (row.get("fields") or {}).get("claimed_by") or ""     # the holder the row names
+    if not admit.held_by_us(seat, rig):
+        return None
     lease = wa.lease_of(backlog_clone, pid, seat, bead.get("metadata") or {})
     if not lease:
         return None
@@ -286,8 +303,8 @@ def main():
                     notify(rig, b, "expiring", "PROOF claim expiring: %s" % pid,
                            facts + "\n\nThe backlog claim ends at %s and the packet is still open.\n"
                            "Renew it on the existing path if the work should continue:\n"
-                           "  python3 scripts/next_work.py --renew %s --by gascity/%s"
-                           % (expires.isoformat(), pid, rig))
+                           "  python3 scripts/next_work.py --renew %s --by %s"
+                           % (expires.isoformat(), pid, claim_holder(backlog_clone, pid) or "<the seat that holds it>"))
     planning_pass(rigs, backlog_clone)
     return 0
 

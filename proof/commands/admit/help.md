@@ -7,12 +7,13 @@ packet completes its item only when admitted with `--landing main`. Before
 admitting, claim the item for the Gas City seat on the existing
 path and land that claim on `main`:
 
-    python3 scripts/next_work.py --claim <id> --by gascity/<rig> --hours 12
+    python3 scripts/next_work.py --claim <id> --by gascity/<factory>/<rig> --hours 12
 
-It refuses unless all of these hold on `origin/main`: the item is on the pilot
-allow-list (`<city>/proof/pilot-allowlist.txt`), is claimed by `gascity/<rig>`
-with at least an hour left, is not a gate, declares a `write_scope`, and writes
-only to the rig's own repository.
+where `<factory>` is this city's workspace name (`gc proof status` prints the
+seat). It refuses unless all of these hold on `origin/main`: the item is on the
+pilot allow-list (`<city>/proof/pilot-allowlist.txt`), is claimed by this
+factory's seat for `<rig>` with at least an hour left, is not a gate, declares
+a `write_scope`, and writes only to the rig's own repository.
 
 `--landing` has no default. It is the packet's whole outward authorization:
 

@@ -76,6 +76,7 @@ def admissible(city, policy_rig, repo, frontier, branches, known, said=None, bac
         if said is not None:
             said.say(key, message)
 
+    factory = admit.factory_name()
     for item in frontier.get("ready", []):
         pid, scopes = item["id"], item.get("writeScope") or []
         if item.get("gate") or not scopes or item.get("claim") != "none" or item.get("status") != "open":
@@ -83,6 +84,11 @@ def admissible(city, policy_rig, repo, frontier, branches, known, said=None, bac
         if {s.split(":", 1)[0] if ":" in s else admit.BACKLOG_REPO for s in scopes} != {repo}:
             continue
         if pid in known or pid in policy_rig["exclude"]:
+            continue
+        # A record routed to another factory is theirs: the ledger would refuse
+        # the claim, so it is not attempted (ADR-0239 decision 4).
+        if item.get("factory") and item["factory"] != factory:
+            say("factory:" + pid, "skip %s: pinned to factory %s (this is %s)" % (pid, item["factory"], factory))
             continue
         if policy_rig["items"] and pid not in policy_rig["items"]:
             continue
@@ -309,12 +315,19 @@ def release(backlog, seat, refused, policy, leases=None):
     if wa.beads(backlog):
         gone = []
         for pid, why in refused:
-            lease = (leases or {}).get(pid) or wa.lease_of(backlog, pid, seat, fresh=True)
+            # The holder is the seat string the row names: this factory's, or
+            # the two-part one of a claim made before pack 0.44.0.
+            row = wa.row(backlog, pid, fresh=True) or {}
+            holder = (row.get("fields") or {}).get("claimed_by") or seat
+            if not admit.held_by_us(holder, admit.seat_rig(seat)):
+                fl.log(ME, "could not release %s: held by %s, not %s" % (pid, holder, seat))
+                continue
+            lease = (leases or {}).get(pid) or wa.lease_of(backlog, pid, holder)
             if not lease:
-                fl.log(ME, "could not release %s: no lease for %s in the ledger" % (pid, seat))
+                fl.log(ME, "could not release %s: no lease for %s in the ledger" % (pid, holder))
                 continue
             try:
-                wa.client(backlog, "release", item=pid, by=seat, lease=lease)
+                wa.client(backlog, "release", item=pid, by=holder, lease=lease)
                 gone.append(pid)
             except fl.Refused as exc:
                 fl.log(ME, "could not release %s: %s" % (pid, str(exc)[-200:]))
@@ -376,8 +389,8 @@ def claim_with_companions(backlog, item, repo, files, seat, hours, max_depth=1):
     scope is written — widening a record is a ledger edit, not a file edit."""
     path, fm, _body, dm = admit.load_item(backlog, item['id'])
     claim_state, _detail = dm.claim(SimpleNamespace(fm=fm), now())
-    if claim_state == "live" and fm.get("claimed_by") == seat:
-        return subprocess.CompletedProcess([], 1, "", "already claimed by %s in an overlapping pass" % seat), []
+    if claim_state == "live" and admit.held_by_us(fm.get("claimed_by"), admit.seat_rig(seat)):
+        return subprocess.CompletedProcess([], 1, "", "already claimed by %s in an overlapping pass" % fm["claimed_by"]), []
     if wa.beads(backlog):
         result = fl.sh([sys.executable, 'scripts/next_work.py', '--claim', item['id'], '--by', seat,
                         '--hours', str(hours)], cwd=backlog)
@@ -545,7 +558,7 @@ def dispatch(city, policy, said, dry_run):
         if out.returncode != 0:
             raise fl.Refused("next_work.py --json failed: %s" % out.stderr.strip()[-300:])
         frontier = json.loads(out.stdout)
-        seat = admit.SEAT_PREFIX + rig
+        seat = admit.seat(rig)
         # A released, substantively re-shaped decline is new work. The planner
         # uses this same classification when counting what this rig can take.
         known_ids, reshaped = known_except_reshaped(backlog, frontier, known,
@@ -564,7 +577,7 @@ def dispatch(city, policy, said, dry_run):
             # …but never one that is blocked: a claimed item that has since been given a
             # question to wait on is not work, and a worker would only decline it.
             if item["id"] in retired_rootless or (item["id"] in known_ids and recovery is None) or item.get("blockers") \
-                    or ("claimed by %s " % seat) not in (item.get("claimDetail") or ""):
+                    or not admit.held_by_us(item.get("claimedBy") or "", rig):
                 continue
             if recovery is not None:
                 if recovery.get("record_pending"):

@@ -42,7 +42,10 @@ PILOTS = {"liskov-agent-orchestrator", "liskov-rs"}
 # itself; a contract that moved on its own evidence refused every completion
 # after that write (2026-10-16). Rows stamped before `evidence` left the
 # digest still carry the legacy value: `legacy_semantic` recognises them.
-VOLATILE = {"status", "claimed_by", "claimed_at", "claim_expires", "last_reviewed", "evidence"}
+# `factory` (ADR-0239 decision 4) routes a record to one factory; routing is
+# not task meaning, so pinning a record moves no digest. A row without the
+# key digests identically under this formula and the legacy one.
+VOLATILE = {"status", "claimed_by", "claimed_at", "claim_expires", "last_reviewed", "evidence", "factory"}
 LEGACY_VOLATILE = {"status", "claimed_by", "claimed_at", "claim_expires", "last_reviewed"}
 HEX = re.compile(r"^[0-9a-f]{64}$")
 
@@ -132,7 +135,7 @@ def claim_identity(item, fm, rig, instant=None):
     except (KeyError, TypeError, ValueError) as exc:
         raise admit.Refused("contract: malformed claim timestamps") from exc
     instant = instant or admit.now()
-    if (fm.get("status") != "working" or fm.get("claimed_by") != admit.SEAT_PREFIX + rig
+    if (fm.get("status") != "working" or not admit.held_by_us(fm.get("claimed_by"), rig)
             or expires <= instant or started > instant or expires <= started):
         raise admit.Refused("contract: claim is expired, replaced or no longer working")
     return {"packet": item, "owner": fm["claimed_by"], "claimed_at": started.isoformat()}
@@ -147,8 +150,8 @@ def work_binding(clone, item, rig):
     if row is None:
         raise admit.Refused("contract: the ledger has no record for " + item)
     lease = row.get("lease_id")
-    if (row.get("fields") or {}).get("claimed_by") != admit.SEAT_PREFIX + rig or not lease:
-        raise admit.Refused("contract: %s carries no live lease for %s%s in the ledger" % (item, admit.SEAT_PREFIX, rig))
+    if not admit.held_by_us((row.get("fields") or {}).get("claimed_by"), rig) or not lease:
+        raise admit.Refused("contract: %s carries no live lease for %s in the ledger" % (item, admit.seat(rig)))
     state = wa.snapshot(clone)[0]
     binding = {"bead_id": records.bead_id(item), "legacy_id": item, "epoch": str(state.get("epoch") or ""),
                "authored_revision": row.get("authored_revision"),
@@ -299,7 +302,7 @@ def validate(contract):
             or not all(isinstance(x, str) for x in contract["validation"])
             or set(contract["claim"]) != {"packet", "owner", "claimed_at"}
             or contract["claim"]["packet"] != contract["packet"]
-            or contract["claim"]["owner"] != admit.SEAT_PREFIX + contract["rig"]
+            or not admit.held_by_us(contract["claim"]["owner"], contract["rig"])
             or set(contract["publication"]) != {"landing", "review"}
             or contract["publication"]["landing"] not in admit.LANDING
             or type(contract["publication"]["review"]) is not bool

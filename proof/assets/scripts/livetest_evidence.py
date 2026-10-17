@@ -687,8 +687,8 @@ def _ledger_record(clone, evidence, commit, effect):
                 wa.client(clone, "complete", item=evidence.item_id, by=holder, lease=str(lease), request={
                     "expected_semantic_digest": seat_row.get("semantic_digest"), "resolution": "done",
                     "evidence": {"merge_sha": commit, "main_sha": commit,
-                                 "attempts": [{"bead_id": evidence.run_id, "rig": holder[len(SEAT_PREFIX):],
-                                               "outcome": evidence.report}],
+                                 "attempts": [{"bead_id": evidence.run_id, "rig": fl.admit.seat_rig(holder),
+                                               "factory": fl.admit.factory_name(), "outcome": evidence.report}],
                                  "acceptance": {"kind": EVIDENCE_KIND, "run_id": evidence.run_id,
                                                 "report": evidence.report, "evidence_digest": evidence.digest,
                                                 "raw": evidence.raw_path}},
@@ -708,7 +708,7 @@ def _ledger_record(clone, evidence, commit, effect):
     # The raw record is evidence on the item whatever happened to it, as the
     # Git path's `evidence:` entry is — appended after the completion, and
     # only by a seat that holds or held the item (the actor the ledger knows).
-    actor = holder or SEAT_PREFIX + "completer"   # a done item has no holder; the publisher signs
+    actor = holder or fl.admit.seat("completer")   # a done item has no holder; the publisher signs
     current = wa.row(clone, evidence.item_id, fresh=True) or seat_row
     entry = _rel(evidence.raw_path, current["path"])
     if (current.get("fields") or {}).get("status") in ("working", "done") \
