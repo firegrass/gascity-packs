@@ -317,7 +317,7 @@ def renew_open(city, policy, backlog, waiting, dry_run, now=None):
         with fl.backlog_write(city):
             renewed = []
             for rig, p, pr, was in candidates:
-                seat = admit.seat(rig)
+                seat = holder_of(backlog, rig, p["id"]) or admit.seat(rig)
                 out = fl.sh([sys.executable, "scripts/next_work.py", "--renew", p["id"], "--by", seat,
                              "--hours", str(policy["claim_hours"])], cwd=backlog)
                 if out.returncode == 0:
@@ -375,9 +375,13 @@ def item_fields(backlog, item_id):
 def holder_of(backlog, rig, item_id):
     """The seat string the ledger row names for an item this factory holds
     (this factory's seat, or the two-part one of an older claim); '' when the
-    row is not ours."""
-    row = wa.row(backlog, item_id) or {}
-    holder = (row.get("fields") or {}).get("claimed_by") or ""
+    row is not ours — or cannot be read: a caller then acts as this factory's
+    seat, exactly as before 0.44.0, and the ledger still judges the lease."""
+    try:
+        fm = item_fields(backlog, item_id) or {}
+    except (fl.Refused, admit.Unavailable, OSError):
+        return ""
+    holder = fm.get("claimed_by") or ""
     return holder if admit.held_by_us(holder, rig) else ""
 
 
@@ -465,7 +469,7 @@ def release_stopped(city, policy, rigs, backlog, dry_run):
         with fl.backlog_write(city):
             released = []
             for rig, p in candidates:
-                seat = admit.seat(rig)
+                seat = holder_of(backlog, rig, p["id"]) or admit.seat(rig)
                 out = fl.sh([sys.executable, "scripts/next_work.py", "--release", p["id"], "--by", seat], cwd=backlog)
                 if out.returncode == 0:
                     released.append((rig, p))
