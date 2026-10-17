@@ -29,7 +29,7 @@ writing. That procedure is understood and hazardous; putting it inside new,
 unproven code is how a pilot damages the thing it is piloting. Claim first with
 the existing tool, land it, then admit:
 
-    python3 scripts/next_work.py --claim <id> --by gascity/<rig> --hours 12
+    python3 scripts/next_work.py --claim <id> --by gascity/<factory>/<rig> --hours 12
 
 A LIVE TEST — an item that declares `live_target` — is a different packet type
 (ADR-0151), and admission never runs one as an implementation packet. It is
@@ -73,7 +73,14 @@ import scope_companions  # noqa: E402
 import shaping_evidence  # noqa: E402
 
 BACKLOG_REPO = "liskov-agent-orchestrator"  # the repository that holds docs/backlog
-SEAT_PREFIX = "gascity/"              # claims must be held by gascity/<rig>
+# A factory's claim seat is `gascity/<factory>/<rig>` (ADR-0239 decision 4):
+# the prefix says "a factory, not a person", the factory is this city's
+# workspace name, the rig the clone that runs the packet. `seat()` is the one
+# builder; `held_by_us()` is the one test, and it still recognises the
+# two-part seat `gascity/<rig>` that claims made before pack 0.44.0 carry, so
+# those packets finish without a re-claim. Remove that arm once `gc proof
+# status` reports no legacy-held claim.
+SEAT_PREFIX = "gascity/"              # a claim held under this prefix is a factory's
 LEASE_KEY = "proof.lease_id"          # the seat's ledger lease, on the execution bead (ADR-0236)
 WORKER = "proof.worker"
 FORMULA = "mol-proof-packet"
@@ -182,6 +189,54 @@ def city_root():
             return here
         here = os.path.dirname(here)
     raise Refused("cannot find the city: set GC_CITY or run inside the city directory")
+
+
+def factory_name():
+    """This factory's name: the city's workspace name, read in gc's own order
+    (config.EffectiveCityName) — `GC_CITY_NAME` (what gc gives pack commands),
+    else the site binding `.gc/site.toml` `workspace_name`, else `city.toml`
+    `[workspace] name`, else the city directory's name. It is one path segment
+    of the claim seat and of the Slack adapter URL, so it is refused otherwise."""
+    name = (os.environ.get("GC_CITY_NAME") or "").strip()
+    if not name:
+        import tomllib
+        root = city_root()
+        for path, read in ((os.path.join(root, ".gc", "site.toml"), lambda d: d.get("workspace_name")),
+                           (os.path.join(root, "city.toml"), lambda d: (d.get("workspace") or {}).get("name"))):
+            try:
+                with open(path, "rb") as fh:
+                    name = str(read(tomllib.load(fh)) or "").strip()
+            except (OSError, ValueError):
+                name = ""
+            if name:
+                break
+        name = name or os.path.basename(os.path.normpath(root))
+    if not name or any(c in name for c in "/?#%") or any(c.isspace() for c in name):
+        raise Refused("factory name %r is not usable in a URL path or a claim seat (one path segment)" % name)
+    return name
+
+
+def seat(rig):
+    """The claim seat this factory holds a packet under: gascity/<factory>/<rig>."""
+    return SEAT_PREFIX + factory_name() + "/" + rig
+
+
+def seat_rig(value):
+    """The rig of a factory seat, either form; '' for a person."""
+    parts = str(value or "")[len(SEAT_PREFIX):].split("/") if str(value or "").startswith(SEAT_PREFIX) else []
+    return parts[-1] if 1 <= len(parts) <= 2 and all(parts) else ""
+
+
+def seat_factory(value):
+    """The factory of a three-part seat; '' for a person or a two-part seat."""
+    parts = str(value or "")[len(SEAT_PREFIX):].split("/") if str(value or "").startswith(SEAT_PREFIX) else []
+    return parts[0] if len(parts) == 2 and all(parts) else ""
+
+
+def held_by_us(claimed_by, rig):
+    """Whether `claimed_by` is this factory's seat for `rig` — or the two-part
+    seat a claim made before pack 0.44.0 still carries (see SEAT_PREFIX)."""
+    return claimed_by in (seat(rig), SEAT_PREFIX + rig)
 
 
 def gc(city, *args, cwd=None, check=True):
@@ -325,36 +380,38 @@ def check_eligible(item_id, fm, dm, rig, want, allowlist_path, clone=None):
                       "human has listed there." % (item_id, allowlist_path))
     check_kind(item_id, fm)
 
-    seat = SEAT_PREFIX + rig
-    if fm.get("status") != "working" or fm.get("claimed_by") != seat:
+    ours = seat(rig)
+    if fm.get("status") != "working" or not held_by_us(fm.get("claimed_by"), rig):
         raise Refused(
             "%s is not claimed for %s on origin/main (status=%s, claimed_by=%s).\n"
             "  Claim it on the existing path, land that on main, then admit again:\n"
             "    python3 scripts/next_work.py --claim %s --by %s --hours 12"
-            % (item_id, seat, fm.get("status"), fm.get("claimed_by"), item_id, seat))
+            % (item_id, ours, fm.get("status"), fm.get("claimed_by"), item_id, ours))
+    holder = fm["claimed_by"]
     expires = fm.get("claim_expires")
     if not expires:
         raise Refused("%s carries no claim_expires" % item_id)
     left = parse_ts(expires) - datetime.now(timezone.utc)
     if left < MIN_CLAIM_LEFT:
         raise Refused("the claim on %s expires in %s; renew it before admitting "
-                      "(next_work.py --renew %s --by %s)" % (item_id, left, item_id, seat))
+                      "(next_work.py --renew %s --by %s)" % (item_id, left, item_id, holder))
     if clone is not None:
-        check_lease(clone, item_id, seat)
+        check_lease(clone, item_id, holder)
     return check_scopes(item_id, fm, dm, want)
 
 
-def check_lease(clone, item_id, seat):
+def check_lease(clone, item_id, holder):
     """Under the Beads authority a claim is a lease: the snapshot row must carry
-    one for the seat, or admission has nothing to bind the run to. Returns the
-    lease id, or '' under Git."""
+    one for the holder (the seat string the row names — this factory's, or the
+    two-part one of an older claim), or admission has nothing to bind the run
+    to. Returns the lease id, or '' under Git."""
     import work_authority as wa
     if not wa.beads(clone):
         return ""
-    lease = wa.lease_of(clone, item_id, seat)
+    lease = wa.lease_of(clone, item_id, holder)
     if not lease:
         raise Refused("%s carries no live lease for %s in the work ledger; claim it on the existing path "
-                      "(next_work.py --claim) and admit again" % (item_id, seat))
+                      "(next_work.py --claim) and admit again" % (item_id, holder))
     return lease
 
 
@@ -1199,7 +1256,7 @@ def admit_live(args, city, rig_clone, backlog_clone, main_sha, item_path, rel_it
     meta = {"proof.packet_id": args.item, "proof.packet_digest": digest, "proof.claim_commit": claim_commit,
             "proof.branch": branch, "proof.exercise": level, "proof.live_target": manifest["target"],
             "proof.live_run_id": run_id, "proof.live_manifest_digest": manifest["digest"], "work_dir": work_dir}
-    lease = check_lease(backlog_clone, args.item, SEAT_PREFIX + args.rig)
+    lease = check_lease(backlog_clone, args.item, fm["claimed_by"])
     if lease:
         meta[LEASE_KEY] = lease
     with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False, encoding="utf-8") as fh:
@@ -1489,7 +1546,7 @@ def main(argv):
             # bead, so the completer, the keeper and a release can renew or
             # settle it without re-reading the snapshot for the holder.
             lease = (contract.get("work") or {}).get("lease_id") if contract else ""
-            lease = lease or check_lease(backlog_clone, args.item, SEAT_PREFIX + args.rig)
+            lease = lease or check_lease(backlog_clone, args.item, fm["claimed_by"])
             if lease:
                 meta[LEASE_KEY] = lease
             meta.update(recovery_review.provenance(city))

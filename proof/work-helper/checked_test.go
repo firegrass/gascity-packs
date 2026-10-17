@@ -264,7 +264,7 @@ func TestCheckedActions(t *testing.T) {
 	}
 
 	// Factory completion of the first item through the real transaction.
-	claimed := l.ok(Request{"action": "claim", "id": "BKLG-20260101-bbbb", "actor": "gascity/lrs"})
+	claimed := l.ok(Request{"action": "claim", "id": "BKLG-20260101-bbbb", "actor": "gascity/test/lrs"})
 	lease, semanticDigest := claimed["lease_id"].(string), claimed["semantic_digest"].(string)
 	complete := func(id, actor, lease, semanticDigest string, extra Request) Request {
 		request := Request{"action": "complete", "id": id, "actor": actor, "lease_id": lease,
@@ -277,17 +277,33 @@ func TestCheckedActions(t *testing.T) {
 		return request
 	}
 	// A replaced lease generation is stale: release, re-claim, then present the old lease.
-	l.ok(Request{"action": "release", "id": "BKLG-20260101-bbbb", "actor": "gascity/lrs", "lease_id": lease})
-	reclaimed := l.ok(Request{"action": "claim", "id": "BKLG-20260101-bbbb", "actor": "gascity/lrs"})
-	l.refused(complete("BKLG-20260101-bbbb", "gascity/lrs", lease, semanticDigest, nil), "lease generation changed")
+	l.ok(Request{"action": "release", "id": "BKLG-20260101-bbbb", "actor": "gascity/test/lrs", "lease_id": lease})
+	reclaimed := l.ok(Request{"action": "claim", "id": "BKLG-20260101-bbbb", "actor": "gascity/test/lrs"})
+	l.refused(complete("BKLG-20260101-bbbb", "gascity/test/lrs", lease, semanticDigest, nil), "lease generation changed")
 	lease = reclaimed["lease_id"].(string)
-	l.refused(complete("BKLG-20260101-bbbb", "gascity/lrs", lease, strings.Repeat("0", 64), nil), "semantic contract changed")
-	l.refused(complete("BKLG-20260101-bbbb", "gascity/lrs", lease, semanticDigest,
+	l.refused(complete("BKLG-20260101-bbbb", "gascity/test/lrs", lease, strings.Repeat("0", 64), nil), "semantic contract changed")
+	l.refused(complete("BKLG-20260101-bbbb", "gascity/test/lrs", lease, semanticDigest,
 		Request{"evidence": map[string]any{"acceptance": map[string]any{"ok": true}}}), "merged pull request")
+	// ADR-0239 decision 5: the shared ledger holds portable facts only. A
+	// completion carrying a machine path, a session name or an execution key
+	// is refused by the helper's transaction, committing nothing.
+	l.refused(complete("BKLG-20260101-bbbb", "gascity/test/lrs", lease, semanticDigest,
+		Request{"evidence": map[string]any{"pull_request": pr, "main_sha": mainSHA,
+			"attempts": []any{map[string]any{"bead_id": "lrs-1", "rig": "lrs", "root": "/home/patrick/projects/x"}}}}),
+		"portability: absolute path")
+	l.refused(complete("BKLG-20260101-bbbb", "gascity/test/lrs", lease, semanticDigest,
+		Request{"notes": "run by proof__worker-pr-abc"}), "portability: session name")
+	l.refused(complete("BKLG-20260101-bbbb", "gascity/test/lrs", lease, semanticDigest,
+		Request{"evidence": map[string]any{"pull_request": pr, "main_sha": mainSHA, "gc.outcome": "pass",
+			"attempts": []any{map[string]any{"bead_id": "lrs-1", "rig": "lrs"}}}}), "portability: execution key")
+	l.refused(complete("BKLG-20260101-bbbb", "gascity/test/lrs", lease, semanticDigest,
+		Request{"work_dir": "x"}), "portability: request key")
+	// A two-part seat (pack releases before 0.44.0) may not claim anew.
+	l.refused(Request{"action": "claim", "id": "BKLG-20260101-cccc", "actor": "gascity/lrs"}, "a factory seat is gascity/<factory>/<rig>")
 	if fields(l.record("BKLG-20260101-bbbb"))["status"] != "working" {
 		t.Fatal("a refused completion changed the row")
 	}
-	done := l.ok(complete("BKLG-20260101-bbbb", "gascity/lrs", lease, semanticDigest, nil))
+	done := l.ok(complete("BKLG-20260101-bbbb", "gascity/test/lrs", lease, semanticDigest, nil))
 	if done["status"] != "done" || done["lease_id"] != nil {
 		t.Fatalf("completion result: %v", done)
 	}
@@ -300,17 +316,17 @@ func TestCheckedActions(t *testing.T) {
 	}
 	// Completion is idempotent by operation identity and refuses a changed request.
 	replay := done["operation_id"].(string)
-	l.ok(complete("BKLG-20260101-bbbb", "gascity/lrs", lease, semanticDigest, Request{"operation_id": replay}))
-	l.refused(complete("BKLG-20260101-bbbb", "gascity/lrs", lease, semanticDigest,
+	l.ok(complete("BKLG-20260101-bbbb", "gascity/test/lrs", lease, semanticDigest, Request{"operation_id": replay}))
+	l.refused(complete("BKLG-20260101-bbbb", "gascity/test/lrs", lease, semanticDigest,
 		Request{"operation_id": replay, "notes": "changed"}), "operation identity reused")
 
 	// The epic's last active child: a factory seat can never close it.
-	claimed = l.ok(Request{"action": "claim", "id": "BKLG-20260101-cccc", "actor": "gascity/lrs"})
+	claimed = l.ok(Request{"action": "claim", "id": "BKLG-20260101-cccc", "actor": "gascity/test/lrs"})
 	lease, semanticDigest = claimed["lease_id"].(string), claimed["semantic_digest"].(string)
-	l.refused(complete("BKLG-20260101-cccc", "gascity/lrs", lease, semanticDigest, nil), "last active child")
-	l.refused(complete("BKLG-20260101-cccc", "gascity/lrs", lease, semanticDigest, Request{"close_epic": true}),
+	l.refused(complete("BKLG-20260101-cccc", "gascity/test/lrs", lease, semanticDigest, nil), "last active child")
+	l.refused(complete("BKLG-20260101-cccc", "gascity/test/lrs", lease, semanticDigest, Request{"close_epic": true}),
 		"factory seat can never close an epic")
-	l.ok(Request{"action": "release", "id": "BKLG-20260101-cccc", "actor": "gascity/lrs", "lease_id": lease})
+	l.ok(Request{"action": "release", "id": "BKLG-20260101-cccc", "actor": "gascity/test/lrs", "lease_id": lease})
 	claimed = l.ok(Request{"action": "claim", "id": "BKLG-20260101-cccc", "actor": "patrick"})
 	lease, semanticDigest = claimed["lease_id"].(string), claimed["semantic_digest"].(string)
 	l.ok(complete("BKLG-20260101-cccc", "patrick", lease, semanticDigest, Request{"close_epic": true,
@@ -351,6 +367,7 @@ func TestCheckedActions(t *testing.T) {
 		itemFields[k] = v
 	}
 	delete(itemFields, "done_at")
+	delete(itemFields, "extra_legacy") // imports keep unknown legacy keys; an author may not add one
 	itemFields["status"], itemFields["parent_epic"], itemFields["evidence"] = "open", "EPIC-20260101-ffff", []any{}
 	l.refused(Request{"action": "author", "actor": "patrick", "record": map[string]any{"id": "EPIC-20260101-ffff",
 		"path": "docs/backlog/epics/EPIC-20260101-ffff-new.md", "fields": epicFields, "body": "x"}}, "active backlog item")
@@ -361,7 +378,7 @@ func TestCheckedActions(t *testing.T) {
 	if authored["authored_revision"] != float64(1) || authored["operational_revision"] != float64(0) {
 		t.Fatalf("author result: %v", authored)
 	}
-	claimed = l.ok(Request{"action": "claim", "id": "BKLG-20260101-gggg", "actor": "gascity/lrs"})
+	claimed = l.ok(Request{"action": "claim", "id": "BKLG-20260101-gggg", "actor": "gascity/test/lrs"})
 	if claimed["status"] != "working" || claimed["lease_id"] == nil {
 		t.Fatalf("claim of authored item: %v", claimed)
 	}
@@ -371,8 +388,8 @@ func TestCheckedActions(t *testing.T) {
 
 	// freeze: live -> frozen, after which every mutation is refused and reads still answer.
 	l.ok(Request{"action": "freeze", "actor": "patrick", "reason": "rollback drill"})
-	l.refused(Request{"action": "claim", "id": "BKLG-20260101-gggg", "actor": "gascity/orc"}, "frozen")
-	l.refused(Request{"action": "release", "id": "BKLG-20260101-gggg", "actor": "gascity/lrs", "lease_id": claimed["lease_id"]}, "frozen")
+	l.refused(Request{"action": "claim", "id": "BKLG-20260101-gggg", "actor": "gascity/test/orc"}, "frozen")
+	l.refused(Request{"action": "release", "id": "BKLG-20260101-gggg", "actor": "gascity/test/lrs", "lease_id": claimed["lease_id"]}, "frozen")
 	l.refused(Request{"action": "activate", "actor": "patrick", "expected_source_sha": strings.Repeat("a", 40)}, "frozen")
 	snapshot := l.ok(Request{"action": "snapshot"})
 	if snapshot["mode"] != "frozen" || snapshot["freeze_reason"] != "rollback drill" {

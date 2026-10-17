@@ -59,6 +59,36 @@ LISKOV_WORK_BACKUP_ROOT = "/home/<user>/projects/gascity/proof-work-backups"
 `GC_CITY_PATH` is set by Gas City for every order. The `gc doctor` check
 `work-retention` reads the `proof-work-doctor` override for the same values.
 
+## 2b. Every other factory: the orders run on the ledger host only
+
+The ledger has one host (ADR-0239 decision 7). A city on any other machine
+shares the ledger but must not replicate, back up or doctor it: it disables
+the three orders by override and leaves the pack's own order files enabled
+(gc applies overrides after its scanner, so an order disabled in the pack
+could not be re-enabled anywhere; and never list one of these under
+`[orders] skip` as well, which makes the override fail as `not found`).
+
+```toml
+[[orders.overrides]]
+name = "proof-work-replicate"
+enabled = false
+
+[[orders.overrides]]
+name = "proof-work-backup"
+enabled = false
+
+[[orders.overrides]]
+name = "proof-work-doctor"
+enabled = false
+```
+
+With `proof-work-doctor` disabled this way, `gc doctor`'s `work-retention`
+check reports that ledger maintenance runs on another factory and passes.
+Not settled here: admission reads the city-local `<city>/proof/work-retention.json`,
+which a disabled doctor never writes, so a non-host factory admits nothing
+until M4 (`BKLG-20261016-1hbw`) decides how it learns the ledger host's
+retention state.
+
 Requirements on the host:
 
 - the workspace's `metadata.json` says `dolt_database: proof_work` and names

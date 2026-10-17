@@ -12,8 +12,50 @@ from execution_contract import digest, legacy_semantic, semantic
 SCHEMA = 'proof.work.v1'
 TERMINAL = policy.TERMINAL_STATUSES
 
+# The record field registry, by record type: the orchestrator's frontmatter
+# key registry (scripts/docs_model.py ALLOWED_KEYS) carried into the ledger so
+# a write can only add a key the validated Markdown export would accept. A key
+# outside it is refused on author, edit and answer (ADR-0239 decision 5).
+BASE_FIELDS = ('title', 'doc_type', 'status', 'owner', 'created', 'last_reviewed',
+               'source_documents', 'confidence', 'related_repos')
+WORK_FIELDS = ('milestone', 'lane', 'gate', 'priority', 'depends_on', 'rank', 'related', 'observability_parity')
+V5_FIELDS = ('v5_gate_id', 'v5_gate_stage', 'v5_required_status', 'v5_evidence_ids', 'v5_verification')
+ITEM_FIELDS = ('parent_epic', 'design_mockup', 'live_target', 'exercise', 'live_recipe', 'live_expected_build',
+               'live_max_age_seconds', 'live_timeout_seconds', 'spend_cap', 'stage', 'timebox', 'review',
+               'model_floor', 'parallel_group', 'reads', 'write_scope', 'validation', 'estimate',
+               'estimate_confidence', 'claimed_by', 'claimed_at', 'claim_expires', 'done_at', 'evidence',
+               'v5_handler_generation', 'v5_inventory_status', 'v5_inventory_count', 'v5_role_convergence',
+               'v5_schema_identity', 'v5_envelope_floor', 'v5_migration_floor', 'v5_production_registration',
+               'v5_activation_date', 'v5_activation_actor', 'v5_activation_generation', 'v5_activation_record',
+               'v5_activation_declared_blockers', 'related_pull_requests',
+               # ADR-0239 decision 4: the factory a record is routed to; a claim
+               # by any other factory seat is refused.
+               'factory')
+EPIC_FIELDS = ('epic_id', 'outcome', 'example_applications', 'done_at')
+MILESTONE_FIELDS = ('milestone_id', 'sequence', 'outcome', 'lanes')
+QUESTION_FIELDS = ('asked_of', 'due', 'resolution', 'answered', 'related_backlog')
+REGISTERED_FIELDS = {
+    'backlog': frozenset(BASE_FIELDS + WORK_FIELDS + V5_FIELDS + ITEM_FIELDS),
+    'epic': frozenset(BASE_FIELDS + WORK_FIELDS + V5_FIELDS + EPIC_FIELDS),
+    'milestone': frozenset(BASE_FIELDS + MILESTONE_FIELDS),
+    'question': frozenset(BASE_FIELDS + V5_FIELDS + QUESTION_FIELDS),
+}
+LIST_FIELDS = frozenset({'source_documents', 'related_repos', 'depends_on', 'related', 'reads',
+                         'write_scope', 'validation', 'evidence', 'lanes', 'related_backlog',
+                         'v5_evidence_ids', 'related_pull_requests'})
+# A factory name is one path segment of a claim seat and of an adapter URL.
+FACTORY_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]*$')
+
+
 class Refused(ValueError):
     pass
+
+
+def factory_problem(value):
+    """Why `value` is not a factory name, or ''."""
+    if not isinstance(value, str) or not FACTORY_RE.fullmatch(value):
+        return 'a factory name is one path segment (letters, digits, . _ -), got %r' % (value,)
+    return ''
 
 
 def bead_id(legacy_id):
@@ -98,12 +140,11 @@ def validate_row(row):
             not (isinstance(v, str) or isinstance(v, list) and all(isinstance(x, str) for x in v))
             for k, v in fm.items()):
         raise Refused('unsupported legacy metadata shape')
-    list_fields = {'source_documents', 'related_repos', 'depends_on', 'related', 'reads',
-                   'write_scope', 'validation', 'evidence', 'lanes', 'related_backlog',
-                   'v5_evidence_ids', 'related_pull_requests'}
-    for key in list_fields & fm.keys():
+    for key in LIST_FIELDS & fm.keys():
         if not isinstance(fm[key], list):
             raise Refused('field must be a list: ' + key)
+    if 'factory' in fm and factory_problem(fm['factory']):
+        raise Refused('invalid factory routing: ' + factory_problem(fm['factory']))
     for key in ('title', 'status', 'created', 'last_reviewed', 'doc_type'):
         if not isinstance(fm.get(key), str) or not fm[key]:
             raise Refused('missing scalar field: ' + key)

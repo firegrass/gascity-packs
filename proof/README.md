@@ -38,9 +38,12 @@ Read-only actions (no `operation_id`, no `actor`):
 - `history {id}` — the record's immutable events, ordered by `at` then
   `operation_id` (each also carries `ledger_revision`), and its receipts.
 
-Mutations carry `epoch`, `operation_id` and `actor`; `gascity/<rig>` is a
-factory seat, any other actor is a person. `shadow` and `live` accept
-mutations, `frozen` refuses every one:
+Mutations carry `epoch`, `operation_id` and `actor`; `gascity/<factory>/<rig>`
+is a factory seat (the factory is the city's `workspace_name`, read by
+`admit.factory_name()`; ADR-0239), any actor not under `gascity/` is a person.
+Every write is refused when it carries a machine path, a Gas City session name,
+a `gc.` key or a field outside the registry (`docs/work-contract.md`,
+Portability). `shadow` and `live` accept mutations, `frozen` refuses every one:
 
 - `import`, `claim`, `renew`, `release`, `edit` — as before: readiness, scope
   overlap, epic capacity, lease generations and authored revisions.

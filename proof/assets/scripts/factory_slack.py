@@ -45,28 +45,13 @@ def city_name():
     """GC_CITY_NAME (what gc gives pack commands), else the city's site binding
     `.gc/site.toml` workspace_name, else city.toml `[workspace] name`, else the
     city directory's name — gc's own order (config.EffectiveCityName)."""
-    name = (os.environ.get("GC_CITY_NAME") or "").strip()
-    if not name:
-        import tomllib
-        import admit
-        try:
-            root = admit.city_root()
-        except Exception as why:
-            raise Unavailable("no GC_CITY_NAME and no city root: %s" % why)
-        for path, read in ((os.path.join(root, ".gc", "site.toml"), lambda d: d.get("workspace_name")),
-                           (os.path.join(root, "city.toml"), lambda d: (d.get("workspace") or {}).get("name"))):
-            try:
-                with open(path, "rb") as fh:
-                    name = str(read(tomllib.load(fh)) or "").strip()
-            except (OSError, ValueError):
-                name = ""
-            if name:
-                break
-        name = name or os.path.basename(os.path.normpath(root))
-    # The name is interpolated into the URL path, as in sc_city.
-    if not name or any(c in name for c in "/?#%") or any(c.isspace() for c in name):
-        raise Unavailable("city name %r is not usable in a URL path" % name)
-    return name
+    # One lookup for the whole pack: the same name is the factory segment of
+    # every claim seat (admit.seat) and, here, a segment of the adapter URL.
+    import admit
+    try:
+        return admit.factory_name()
+    except Exception as why:
+        raise Unavailable("no usable city name: %s" % why)
 
 
 def adapter_base():

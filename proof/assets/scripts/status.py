@@ -168,6 +168,31 @@ def live_slot_line(city, now=None):
         run.attempts_used + run.attempts_remaining, ": " + run.detail if run.detail else "")
 
 
+def seat_lines(rigs):
+    """This factory's claim seat, and how many live claims the ledger still
+    holds under the two-part seat of pack releases before 0.44.0 (ADR-0239):
+    those packets finish as they are; the legacy arm of `admit.held_by_us`
+    can go once the count is zero."""
+    try:
+        factory = admit.factory_name()
+    except Exception as exc:  # noqa: BLE001 - one line, never a broken screen
+        return ["seat     unknown — %s" % exc]
+    lines = ["seat     %s%s/<rig>" % (admit.SEAT_PREFIX, factory)]
+    try:
+        clone = admit.backlog_clone_of(rigs)
+        import work_authority as wa
+        if wa.beads(clone):
+            legacy = sorted(dm_id for dm_id, record in wa.corpus(clone).by_id.items()
+                            if record.status == "working" and admit.seat_factory(record.fm.get("claimed_by")) == ""
+                            and str(record.fm.get("claimed_by") or "").startswith(admit.SEAT_PREFIX))
+            if legacy:
+                lines.append("         %d claim%s held under the pre-0.44.0 seat gascity/<rig>: %s — they finish as "
+                             "they are" % (len(legacy), "" if len(legacy) == 1 else "s", ", ".join(legacy)))
+    except Exception as exc:  # noqa: BLE001
+        lines.append("         legacy claims unknown — %s" % exc)
+    return lines
+
+
 def main(argv):
     city = fl.city_dir()
     print("factory  " + factory_health.summary(city), flush=True)
@@ -183,6 +208,8 @@ def main(argv):
             record.get("root", "controller"), record.get("detail", "")), flush=True)
     policy = fl.load_policy(city)
     rigs = admit.load_rigs(city)
+    for line in seat_lines(rigs):
+        print(line, flush=True)
     states = fl.rig_states(city)
     observed = admit.gc(city, "session", "list", "--json", check=False)
     try:

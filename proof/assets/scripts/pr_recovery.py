@@ -184,7 +184,7 @@ def claim(city, record, rigs):
             old = git(backlog, "show", record["packet_digest"])
             if semantic(old, dm) != semantic(Path(item_path).read_text(), dm):
                 raise fl.Refused("packet or claim identity changed since admission")
-        if fm.get("status") != "working" or fm.get("claimed_by") != admit.SEAT_PREFIX + record["rig"]:
+        if fm.get("status") != "working" or not admit.held_by_us(fm.get("claimed_by"), record["rig"]):
             raise fl.Refused("packet no longer belongs to this rig")
         if admit.parse_ts(fm.get("claim_expires")) <= now():
             raise fl.Refused("packet claim expired")
